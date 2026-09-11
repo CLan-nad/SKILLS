@@ -157,20 +157,6 @@ export PATH=/tmp:$PATH
 
 ---
 
-## 麒麟特有组件速查
-
-| 组件 | 二进制 | 功能 | 验证重点 |
-|------|-------|------|---------|
-| KYSEC | kydima_set | 安全监控开关 | 能否关闭监控 |
-| UKUI | ukui-screensaver-checkpass | 锁屏验证 | 能否绕过锁屏 |
-| UKUI | changeuserpwd | 密码修改 | 能否修改他人密码 |
-| 三权分立 | security-reinforce-daemon | 安全加固 | 能否注入进程 |
-| 三权分立 | ksaf_auth | 认证 | 能否绕过认证 |
-| 可信计算 | kytrust_config | 信任链配置 | 能否篡改启动链 |
-| 盒子 | boxmount/boxumount | 挂载管理 | 能否挂载/卸载任意路径 |
-
----
-
 ## 相邻攻击面指引
 
 - PolicyKit 策略审计 → 模式 D：[polkit-authz.md](polkit-authz.md)

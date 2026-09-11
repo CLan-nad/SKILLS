@@ -260,7 +260,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 |------|------|
 | [references/component-discovery.md](references/component-discovery.md) | 组件信息收集、通信机制速查、系统状态对比、配置/sudo/cron/Unix socket 审计 |
 | [references/suid-analysis.md](references/suid-analysis.md) | SUID 五步判定、二进制逆向（checksec/nm/strace）、GTFOBins、PATH 劫持 |
-| [references/cap-analysis.md](references/cap-analysis.md) | 能力组合风险矩阵、麒麟组件分析、进程内代码执行注入（LD_PRELOAD / Qt 插件目录劫持） |
+| [references/cap-analysis.md](references/cap-analysis.md) | 能力组合风险矩阵、进程内代码执行注入（LD_PRELOAD / Qt 插件目录劫持） |
 | [references/dbus-authz.md](references/dbus-authz.md) | D-Bus 方法关键词映射（P0-P3）、决策树、参数注入探测、白名单管控识别、验证命令 |
 | [references/polkit-authz.md](references/polkit-authz.md) | PolicyKit allow_active 审计、pkexec 用法 |
 | [references/deep-exploitation.md](references/deep-exploitation.md) | D-Bus 深入利用：白名单管控绕过四法（LD_PRELOAD 首选/bwrap/PYTHONPATH/ptrace）、任意文件写利用链、提权链 Python 模板、符号链接绕过 |

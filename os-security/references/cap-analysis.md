@@ -61,19 +61,6 @@ python3 -c "print(bin(<cap-value>))"
 | `cap_dac_read_search` alone | 任意文件读取 | 信息泄露 |
 | `cap_net_raw` alone | 原始套接字 | 网络嗅探 |
 
-## 已知能力目标速查（麒麟组件）
-
-`find / -type f -exec getcap {} +` 命中即按上文组合矩阵评估；以下为麒麟常见预置能力目标
-（亦可能是攻击者视角的高价值入口）：
-
-| 二进制 | 能力 | 风险 |
-|--------|------|------|
-| /usr/sbin/kydima-daemon | dac_override, dac_read_search, sys_module, sys_ptrace, sys_admin | P0 近乎完全 root |
-| /usr/sbin/security-reinforce-daemon | dac_override, dac_read_search, sys_ptrace | P0 ptrace 注入 + 任意读 |
-| /usr/sbin/kytrust_config | dac_override, sys_rawio | P0 任意读 + 裸磁盘 IO |
-| /usr/sbin/kysec_auth, /usr/sbin/ksaf_auth | dac_override, dac_read_search | P1 任意文件读写 |
-| /usr/bin/boxumount | chown, dac_override, dac_read_search, fowner, sys_admin | P0 任意挂载/文件操作 |
-
 ## 进程内代码执行注入（LD_PRELOAD / Qt 插件目录劫持）
 
 **定位**：这两种手法是**同一个利用方式的两个载体**——让带能力的进程加载攻击者控制的库/插件，
