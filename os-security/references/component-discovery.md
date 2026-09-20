@@ -14,49 +14,69 @@ Linux 组件通过以下机制暴露攻击面，按组件类型匹配：
 | Unix Socket | 守护进程 | `ss -xlpn` | 权限检查 → 连接测试 |
 | loopback TCP/UDP | 守护进程 | `ss -tlnp \| grep 127` | 端口连接 → 认证测试 |
 | securityfs | 内核模块 | `ls /sys/kernel/security/` | 读写权限测试 |
-| 配置文件 | 所有类型 | `rpm -ql` 过滤 | 权限检查 → 注入点分析 |
+| 配置文件 | 所有类型 | 文件清单过滤 | 权限检查 → 注入点分析 |
 
 ---
 
-## A0：信息收集
+## A0：锁定组件边界与信息收集
 
-### 包信息
+先**确定组件由何种机制管理**，锁定审计边界，再取文件清单。
+
+### A0-a：形态探测
 
 ```bash
-# 文件清单 — 组件安装了哪些文件
-rpm -ql <组件名>
+# RPM 系
+rpm -qa 2>/dev/null | grep -i <关键字>
 
-# 包详情 — 版本、描述
-rpm -qi <组件名>
+# Debian 系
+dpkg -l 2>/dev/null | grep -i <关键字>
+apt show <组件名> 2>/dev/null   # 备选
 
-# 依赖关系 — 关联了哪些其他组件
-rpm -q --requires <组件名>
+# 应用分发框架（snap/flatpak 等）
+snap list 2>/dev/null | grep -i <关键字>
+flatpak list 2>/dev/null | grep -i <关键字>
 
-# 检查是否有更新（仓库对比）
-yum list available <组件名> 2>/dev/null
+# 入口定位
+which <组件名>
 ```
 
-**输出**：文件清单、版本号、依赖关系。据此判断组件构成。
+### 分支判定
+
+| 形态 | 判定特征 | 唯一标识 | 文件清单命令 | 边界 |
+|------|---------|---------|-------------|------|
+| RPM 系 | `rpm -qa` 有输出 | 源码包名 | `rpm -ql <包名>` | 包文件清单 |
+| Debian 系 | `dpkg -l` 有输出 | 源码包名 | `dpkg -L <包名>` | 包文件清单 |
+| 应用分发框架（少见） | 主流包管理器无归属 + 入口指向框架托管目录 | 应用 ID | **先确定管理该组件的命令/工具**（入口 `which`、安装目录观察、框架自带的管理/查询接口），再取其文件清单 | **应用 ID + 应用层文件**；运行时层/基础层/宿主服务归属框架组件，**不并入审计边界** |
+
+> 应用分发框架形态不预设具体框架名称：先通过入口与目录确定"由什么工具管理"，再使用该工具公开的查询/管理界面取清单。主流包管理器可归属的组件一律走前两行。
+
+### A0-b：输出
+
+1. **文件清单**：组件自身安装的文件（按下方解读分组）。
+2. **边界判定结论**：明确"组件自身 = X；关联但排除 = Y"（Y 为运行时/基础层/宿主服务等关联实体，记录为关联观察，不测试）。
 
 ### 文件清单解读
 
-拿到 `rpm -ql` 输出后，按文件类型分组：
+拿到文件清单后（RPM 系 `rpm -ql <包名>`，Debian 系 `dpkg -L <包名>`，应用分发框架用其管理工具接口），按文件类型分组：
 
 ```bash
+# 文件清单写入变量（示例取 Debian 系，RPM 系用 rpm -ql）
+FILE_LIST=$(dpkg -L <包名> 2>/dev/null || rpm -ql <包名> 2>/dev/null)
+
 # 二进制文件
-rpm -ql <组件名> | grep -E '^/(usr/)?s?bin/'
+echo "$FILE_LIST" | grep -E '^/(usr/)?s?bin/'
 
 # 库文件
-rpm -ql <组件名> | grep '\.so'
+echo "$FILE_LIST" | grep '\.so'
 
 # 配置文件
-rpm -ql <组件名> | grep -E '\.(conf|cfg|xml|policy|rules)$'
+echo "$FILE_LIST" | grep -E '\.(conf|cfg|xml|policy|rules)$'
 
 # systemd 服务
-rpm -ql <组件名> | grep '\.service$'
+echo "$FILE_LIST" | grep '\.service$'
 
 # 内核模块
-rpm -ql <组件名> | grep '\.ko$'
+echo "$FILE_LIST" | grep '\.ko$'
 ```
 
 ---
@@ -87,6 +107,20 @@ rpm -ql <组件名> | grep '\.ko$'
 
 ---
 
+## A1.5：归属校验（对运行时实体强制）  <!-- 放在 A2 前 -->
+
+对组件运行过程中接触到的每个实体（进程、D-Bus 服务、PolicyKit action、挂载点），先确认归属，
+再决定是否测试：
+
+| 实体 | 校验方法 | 归属本组件的判定 |
+|------|---------|-----------------|
+| 进程/二进制 | `readlink /proc/PID/exe` → `dpkg -S` / `rpm -qf` 查询 | 路径落在组件文件清单内 |
+| D-Bus 服务 | 服务进程 exe 归属 + 策略文件命名 | 策略文件以组件名命名（`find /etc/dbus-1 /usr/share/dbus-1 -name "*<组件名>*"`）|
+| PolicyKit action | `pkaction` 输出 + action 文件路径 | action 文件以组件名命名 |
+| 挂载/沙箱 | 挂载源路径与生成配置 | 由组件自身配置文件/包声明产生 |
+
+**判定**：落入组件清单 → 可测；否则记入"关联观察"，不测试、不赋编号、不进 POC。
+
 ## A2：权限与接口摸底
 
 对组件安装的所有文件执行权限和接口检查：
@@ -94,7 +128,7 @@ rpm -ql <组件名> | grep '\.ko$'
 ### SUID/SGID 检查
 
 ```bash
-find <rpm -ql 输出的文件列表> -perm /6000 2>/dev/null
+find <文件清单> -perm /6000 2>/dev/null
 # SUID (4000) 或 SGID (2000) → 高价值目标
 ```
 

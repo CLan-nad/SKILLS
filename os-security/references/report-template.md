@@ -1,4 +1,4 @@
-# 漏洞报告模板（KVE 格式）
+# 漏洞报告模板
 
 ## 漏洞标题命名规则
 
@@ -22,7 +22,7 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 ## 报告模板
 
 ```markdown
-# KVE-{年份}-{序号}
+# vuln-00N
 
 ## 漏洞标题
 
@@ -32,7 +32,7 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 
 | 字段 | 内容 |
 |------|------|
-| 漏洞编号 | KVE-{年份}-{序号} |
+| 漏洞编号 | vuln-00N（每组件内从 001 递增，与目录名一致） |
 | 危害等级 | {严重/高危/中危/低危} |
 | 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:{X}/AC:{X}/PR:{X}/UI:{X}/S:{X}/C:{X}/I:{X}/A:{X} |
 | 评分 (CVSS 3.1) | {0.0-10.0} |
@@ -66,6 +66,8 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 {根因分析。描述漏洞产生的根本原因，附关键代码片段或配置片段。}
 
 ## 复现步骤 / POC 脚本
+
+> 产物结构：每漏洞一个目录 `<目标名>/vuln-00N/`，POC 脚本以独立文件存放（`vuln-00N/poc.<扩展名>`，Shell 用 `poc.sh`、Python 用 `poc.py`，不写死扩展名）；报告内本节点保留步骤说明。
 
 ### 测试环境
 
@@ -163,7 +165,7 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 ### 示例 1：D-Bus 未授权冻结服务
 
 ```markdown
-# KVE-2026-05138
+# vuln-001
 
 ## 漏洞标题
 
@@ -173,7 +175,7 @@ com.kylin.ProcessManagerDaemon.SetSystemdUnitFreezelimit 方法存在未授权�
 
 | 字段 | 内容 |
 |------|------|
-| 漏洞编号 | KVE-2026-05138 |
+| 漏洞编号 | vuln-001 |
 | 危害等级 | 中危 |
 | 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H |
 | 评分 (CVSS 3.1) | 6.1 |
@@ -253,7 +255,7 @@ busctl --system call com.kylin.ProcessManagerDaemon \
 ### 示例 2：D-Bus + PolicyKit 未授权
 
 ```markdown
-# KVE-2026-05147
+# vuln-002
 
 ## 漏洞标题
 
@@ -263,7 +265,7 @@ com.redhat.tuned.switch_profile 方法存在未授权 profile 切换漏洞
 
 | 字段 | 内容 |
 |------|------|
-| 漏洞编号 | KVE-2026-05147 |
+| 漏洞编号 | vuln-002 |
 | 危害等级 | 高危 |
 | 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H |
 | 评分 (CVSS 3.1) | 7.1 |
@@ -338,7 +340,7 @@ busctl call com.redhat.tuned /Tuned com.redhat.tuned.control switch_profile s "b
 ### 示例 3：D-Bus bwrap 白名单绕过
 
 ```markdown
-# KVE-2026-001
+# vuln-003
 
 ## 漏洞标题
 
@@ -348,7 +350,7 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞
 
 | 字段 | 内容 |
 |------|------|
-| 漏洞编号 | KVE-2026-001 |
+| 漏洞编号 | vuln-003 |
 | 危害等级 | 高危 |
 | 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N |
 | 评分 (CVSS 3.1) | 7.8 |
@@ -438,7 +440,7 @@ finally:
 ### 示例 4：SUID 提权
 
 ```markdown
-# KVE-2026-0501
+# vuln-004
 
 ## 漏洞标题
 
@@ -448,7 +450,7 @@ finally:
 
 | 字段 | 内容 |
 |------|------|
-| 漏洞编号 | KVE-2026-0501 |
+| 漏洞编号 | vuln-004 |
 | 危害等级 | 高危 |
 | 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H |
 | 评分 (CVSS 3.1) | 7.8 |
@@ -532,7 +534,7 @@ md5sum /etc/shadow  # 确认文件内容与利用输出一致
 ### 示例 5：文件能力漏洞
 
 ```markdown
-# KVE-2026-0502
+# vuln-005
 
 ## 漏洞标题
 
@@ -542,7 +544,7 @@ libbox1 组件 boxumount 存在弱路径校验任意卸载漏洞
 
 | 字段 | 内容 |
 |------|------|
-| 漏洞编号 | KVE-2026-0502 |
+| 漏洞编号 | vuln-005 |
 | 危害等级 | 高危 |
 | 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H |
 | 评分 (CVSS 3.1) | 7.1 |

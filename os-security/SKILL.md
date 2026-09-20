@@ -71,6 +71,17 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
   └─ 配置文件路径    → 模式 E：配置文件驱动
 ```
 
+### 审计边界（必须先做）
+
+**目标组件的唯一标识**：源码包名 / 应用 ID / 用户给定的路径。**审计范围 = 该标识直接归属的文件、进程、服务、策略。**
+
+- 与本组件**相关但归属其他组件**的实体（宿主框架、运行时、基础层、第三方守护进程）→ **不测试**，仅记录为"关联观察"附注（不赋漏洞编号、不进 POC、不参与结论）。
+- **归属校验**（测试任何运行时实体前必须执行）：
+  - 进程/二进制：`readlink /proc/PID/exe` → `dpkg -S` / `rpm -qf` 查询归属
+  - D-Bus/PolicyKit：策略文件是否以组件唯一标识命名（`find /etc/dbus-1 /usr/share/dbus-1 /usr/share/polkit-1 -name "*<标识>*"`）
+  - 挂载/沙箱：是否由组件自身的配置（文件清单内的配置、包声明文件）产生
+  - 校验结果属于本组件 → 可测；不属于 → 归"关联观察"，不测试
+
 ### 前置步骤：执行组件
 
 **不运行就测试等于白测。** 有 `.service` → `systemctl start`。有 `.ko` → `insmod`/`modprobe`。已在运行的检查状态即可。无法启动的记录原因，跳过运行时测试只测静态项。
@@ -89,11 +100,11 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 
 ### 模式 A：组件驱动
 
-详见 [references/component-discovery.md](references/component-discovery.md)。
+详见 [references/component-discovery.md](references/component-discovery.md)。**先读其中的 A0-A2 锁定审计边界，再继续。**
 
 | 步骤 | 内容 |
 |------|------|
-| A0 | `rpm -ql` → 文件清单 |
+| A0 | 锁定组件边界 + 取文件清单（多形态探测见 component-discovery.md A0）|
 | A1 | 组件分类（内核模块/守护进程/工具/配置/库）|
 | A2 | 权限摸底（SUID/Cap/D-Bus/PolicyKit/配置）|
 | A3 | 启服前后 diff（netlink/securityfs/D-Bus/socket）|
@@ -202,9 +213,15 @@ busctl --system call <服务> <路径> <接口> <方法> <参数>
 
 D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](references/deep-exploitation.md)：白名单管控绕过（**遇到管控才绕，不上来就绕；LD_PRELOAD 优先**，bwrap/PYTHONPATH 限宽松服务，ptrace 替补）、任意文件写（SSH key/cron/systemd/sudoers.d/PAM）、路径穿越、提权链。
 
+### 产物结构
+
+- 每漏洞一个目录：`<目标名>/vuln-00N/`，内含 `report.md` + `poc.<扩展名>`（POC 脚本语言按利用方式选择：Shell 用 `poc.sh`、Python 用 `poc.py`，不写死扩展名）。
+- 编号规则：`vuln-001`、`vuln-002`… 每组件从 001 递增，目录名与报告编号一致。
+- test-log 固定：`<目标名>/test-log.md`。
+
 ### 报告
 
-按 [references/report-template.md](references/report-template.md) KVE 格式输出，CVSS 3.1 逐项写依据。
+按 [references/report-template.md](references/report-template.md) 漏洞报告格式输出，CVSS 3.1 逐项写依据。
 
 ---
 
@@ -231,7 +248,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 
 ### 发现漏洞
 
-按 report-template.md 完整输出（KVE 编号 + 漏洞信息表 + 内部/外部概述 + 漏洞原因 + POC + 修复建议）。
+按 report-template.md 完整输出（vuln 编号 + 漏洞信息表 + 内部/外部概述 + 漏洞原因 + POC + 修复建议）。
 
 ---
 
@@ -264,7 +281,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 | [references/dbus-authz.md](references/dbus-authz.md) | D-Bus 方法关键词映射（P0-P3）、决策树、参数注入探测、白名单管控识别、验证命令 |
 | [references/polkit-authz.md](references/polkit-authz.md) | PolicyKit allow_active 审计、pkexec 用法 |
 | [references/deep-exploitation.md](references/deep-exploitation.md) | D-Bus 深入利用：白名单管控绕过四法（LD_PRELOAD 首选/bwrap/PYTHONPATH/ptrace）、任意文件写利用链、提权链 Python 模板、符号链接绕过 |
-| [references/report-template.md](references/report-template.md) | KVE 报告模板、CVSS 3.1 严格评分指南、危害判定对照表 |
+| [references/report-template.md](references/report-template.md) | 漏洞报告模板、CVSS 3.1 严格评分指南、危害判定对照表 |
 
 ---
 
@@ -274,13 +291,16 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 - [ ] 步骤 0 权限基线已完成
 - [ ] 系统级命令验证，未依赖返回值
 - [ ] CVSS 评分逐项有依据
+- [ ] 审计边界已锁定，清单外实体仅记为关联观察、未测试
 - [ ] 测试范围未超出用户指定
 - [ ] 门禁检查已执行，不适用项已标注原因
 - [ ] 组件已执行后才做的运行时检查（D-Bus/端口/netlink）
 - [ ] test-log.md 已记录关键步骤
+- [ ] 每漏洞产出 `<目标名>/vuln-00N/report.md + poc.<扩展名>`，编号连续
+- [ ] 文件写入 `<目标名>/`，未在用户工作目录留临时文件
 
 **模式 A**：
-- [ ] rpm -ql 文件清单完整，组件分类正确
+- [ ] 组件边界已锁定（文件清单完整且归属校验通过），组件分类正确
 - [ ] 系统状态 diff 已执行
 
 **模式 B**：
