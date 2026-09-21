@@ -3,22 +3,29 @@
 ## 侦察命令
 
 ```bash
-# 列出所有 D-Bus 系统服务
+# 列出所有 D-Bus 服务（系统总线）
 busctl list --system
 
-# 枚举指定服务的所有接口和方法
+# 列出当前用户的会话总线服务（GUI/桌面组件必查）
+busctl --user list
+
+# 枚举指定服务的所有接口和方法（系统总线）
 busctl introspect <服务名> <对象路径>
+# 会话总线服务
+busctl --user introspect <服务名> <对象路径>
 
-# 查看服务的 XML Policy 配置
+# 查看服务的 XML Policy 配置（系统总线 / 会话总线）
 cat /etc/dbus-1/system.d/<服务名>.conf
+find /etc/dbus-1/session.d /usr/share/dbus-1/services -name "*<服务名>*"
 
-# 发现服务完整的对象路径树
+# 发现服务完整的对象路径树 —— 必须执行；根路径为空也要下钻
 busctl tree <服务名>
+busctl --user tree <服务名>
 
 # 查看服务进程信息（PID、UID、可执行文件路径）
 busctl status <服务名>
 # 输出 PID=1234, UID=0, Command=/usr/libexec/kylin-nm-sysdbus
-# → Command 路径用于后续二进制分析（strings/strace/checksec）
+# → Command 路径用于探测无果时的二进制辅助分析（strings/strace/checksec）
 
 # 查看 D-Bus 服务激活文件（服务名 → 二进制映射）
 cat /usr/share/dbus-1/services/<服务名>.service
@@ -26,6 +33,8 @@ cat /usr/share/dbus-1/services/<服务名>.service
 # Name=org.kaiming.proxy
 # Exec=/opt/kaiming-tools/bin/kaiming-sessionproxy-dbus
 ```
+
+> **枚举完整性**：`introspect` 只对**单个对象路径**生效。一个服务名可挂多个对象路径/多个接口，必须 `busctl tree` 拿到全部路径后**逐路径 introspect**。典型陷阱：根路径 `/` 只返回 `Introspectable`/`Peer`（看似空壳），真正的接口挂在子路径下。
 
 ## D-Bus 安全三层控制
 
@@ -43,6 +52,36 @@ cat /usr/share/dbus-1/services/<服务名>.service
 cat /etc/dbus-1/system.d/<service>.conf | grep -A5 'context="default"'
 sudo -u nobody dbus-send --system --print-reply --dest=<service> <object> <interface>.<method>
 ```
+
+---
+
+## 会话总线（用户总线）测试
+
+GUI/桌面组件优先测会话总线——**权限模型与系统总线完全不同**：
+
+| 对比项 | 系统总线 | 会话总线 |
+|--------|---------|---------|
+| 访问控制 | XML Policy（`/etc/dbus-1/system.d/`）+ 可选 polkit/limitCtl | **默认按 UID 隔离：同一用户的任意进程均可调用** |
+| 服务所有者 | 常为 root 守护进程 | 常为登录用户进程 |
+| 典型攻击面 | 越权（普通用户 → root） | 同域信任边界（不可信输入 / 同机受限进程 → 用户上下文危害） |
+
+```bash
+# 枚举
+busctl --user list
+busctl --user tree <服务名>
+busctl --user status <服务名>
+busctl --user introspect <服务名> <对象路径>
+
+# 普通用户调用（同域任意进程均可）
+busctl --user call <服务名> <对象路径> <接口> <方法> <参数>
+```
+
+要点：
+
+- 会话总线服务**没有"未授权"概念**（同 UID 即可调用），判定重心从"能否调用"转为"调用后能造成什么"（参数注入、持久化污染、触发高权限分支）。
+- 会话总线做不到跨用户/提权，属**同权限域缺陷**——严格模式下不计入漏洞；如需产出，须先经 SKILL.md「可选扩展模式」取得用户确认。
+- Qt 应用自动导出 `org.qtproject.Qt.QWidget` 等接口，可直接触发关闭/退出代码路径（见本文件「对象路径 × 接口 × 方法全量枚举」）。
+- 与 [component-discovery.md](component-discovery.md) A3 的会话总线 diff、[cap-analysis.md](cap-analysis.md) 的 Qt 插件目录劫持配合使用。
 
 ---
 
@@ -173,28 +212,74 @@ pkaction --action-id <action> --verbose | grep implicit
   ├─ 含 unbind/unlink?              → P0 → 测是否解绑认证设备
   ├─ 含 write/create?               → P0 → 测是否写入系统文件
   ├─ 含 set/update/change/modify?   → P1 → 测是否需要鉴权
-  └─ 含 get/list/dump/export?       → P3 → 测返回是否含敏感信息
+  ├─ 含 get/list/dump/export?       → P3 → 测返回是否含敏感信息
+  └─ 参数拼进 SQL/命令字符串?       → 注入 → 一阶/二阶（见「参数签名与注入探测」）
 ```
 
 ---
 
-## 参数签名与注入探测
+## 对象路径 × 接口 × 方法全量枚举
 
-| 签名 | 含义 | POC 关注点 |
-|------|------|-----------|
-| `s` | string | 附带基础注入探测 (`"; id; #"`) |
-| `as` | string 数组 | 数组元素注入 |
-| `i`/`u`/`x` | int/uint/int64 | 边界值 (-1, 0, MAX) |
-| `b` | boolean | 翻转测试 |
+**规则：枚举必须穷尽，逐个调用并成表记录。**
 
 ```bash
-# 基础注入探测
-string:"\"; id; #\""
-string:"| whoami"
-
-# 路径遍历探测
-string:"../../../etc/shadow"
+# 1. 拿全部对象路径
+busctl tree <服务名>              # 系统总线；会话总线加 --user
+# 2. 逐路径枚举接口与方法签名
+for p in <全部对象路径>; do busctl introspect <服务名> "$p"; done
+# 3. 对每个方法按签名以普通用户身份逐个调用，记录返回值/报错分层
 ```
+
+记录表：
+
+| 服务 | 对象路径 | 接口 | 方法 | 签名 | 普通用户可达 | 初步定级 |
+|------|---------|------|------|------|-------------|---------|
+
+**三个必须遵守的点**：
+
+1. **根路径空 ≠ 安全**：`introspect <服务> /` 只返回 `Introspectable`/`Peer` 时，必须用 `busctl tree` 下钻全部子对象路径——接口常挂在子路径下。
+2. **空壳服务名也要看**：与组件同名/近似的服务名即使根路径为空，也先 `tree` 一遍再判定。
+3. **Qt 自动导出接口**：任何 Qt 应用都会把 `QWidget` 导出到会话总线（`org.qtproject.Qt.QWidget`，方法如 `close()`/`show()`/`hide()`），**无需组件自行注册**，是零成本触发面——常可用来触发应用的"关闭/退出"分支。
+
+---
+
+## 参数签名与注入探测（逐字段 fuzz）
+
+**原则：每个字段单独测**。数组/结构体逐元素替换，一次只改一个字段，观察返回与副作用。
+
+| 签名 | 含义 | fuzz 关注点 |
+|------|------|-----------|
+| `s` | string | 注入载荷、超长、空串、编码绕过 |
+| `as`/`ay` | 数组 | **逐元素替换**（每个元素都可能是独立拼接点） |
+| `a{sv}` | 字典 | 键名与值都可能被拼进 SQL/配置 |
+| `struct` | 结构体 | 逐成员替换 |
+| `i`/`u`/`x` | int/uint/int64 | 边界值 (-1, 0, MAX)、负值、超大值 |
+| `b` | boolean | 翻转测试 |
+
+**注入载荷清单**（按消费端选择）：
+
+```bash
+# shell（被拼进 system/popen/shell 命令）
+"; id; #"   ;   $(id)   ;   `id`   ;   ${IFS}   ;   换行注入
+# SQL（被拼进 insert/update 且未参数化）
+'   ;   ')--   ;   '||(select ...)--
+# 路径遍历
+../../../etc/shadow   ;   ../../../../root/.ssh/id_rsa
+# 格式化字符串
+%s%s%s%s%n
+# 超长 / 边界
+<100KB 字符串>   ;   空串   ;   纯空白
+```
+
+**判定方法**：
+
+1. **拼接点识别**：参数被拼进 SQL / 命令字符串（未转义、未参数化）即构成注入。通过报错回显（SQL 语法错误、`sh: ...: not found`）或副作用观测确认。
+2. **一阶注入**：载荷当次调用即被消费（如直接拼进 `system()`）→ 直接观测系统级效果。
+3. **二阶（存储型）注入**：载荷先写入持久化（数据库/配置/文件），随后由**另一个接口、另一次启动或另一个进程**消费——**注入点与触发点分离**。必须验证三件事：① 载荷确已落盘；② 确认被重载（重启/重连后仍在）；③ 找到消费它的触发路径。
+4. **配置门控维度**：触发路径常被**默认关闭**的配置开关门控。测试顺序必须是：**默认配置下注入 → 改配置开闸 → 重启 → 触发**；若先开闸再注入，入口可能因门控生效而拒绝写入（实测曾出现写入行数为 0）。
+5. **汇合点验证**（不依赖返回值）：用系统级标记（如 `touch /tmp/marker`）并核对 `owner uid`；用 `strace -f -e trace=execve` 观测是否真的出现 `sh -c` / `rm` / `touch`。**不要只看接口返回值**。
+
+**反模式**：不得以未验证的假设（如"自动清理疑似走了安全路径"）结束探测——"不可达"的结论必须有系统级证据。
 
 如果普通用户调用已返回权限错误，注入测试无意义——先确认是否未授权访问。
 

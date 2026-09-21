@@ -52,9 +52,52 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 
 **Polkit 专项**：`modify.own` + `yes` = 正常。只有 `modify.system` + `yes` 才是漏洞。
 
+### 可选扩展模式：同权限域缺陷（插拔，默认关闭）
+
+上述拒绝标准按**权限边界**判定：只有"普通用户绕过权限检查、执行原本需要 root 的操作"才算漏洞。这对**非特权目标**（以登录用户运行、无 SUID/Cap、无特权总线服务）会让全部缺陷落空。
+
+为按需扩大产出，提供**插拔式扩展模式**——默认不启用，探测到非特权目标时由用户决定：
+
+**触发门控**（权限摸底后判定；模式 A 的 A2 / 模式 B 的 B0 / 模式 D 的 D0）：
+
+- `非特权实体` = 无 SUID/SGID + 无 capabilities + 以登录用户（非 root）运行 + 无 root 守护进程/系统总线特权服务（或特权方法均要求认证）
+- **先完成全部特权面测试**；当剩余/全部攻击面都落在登录用户权限域内时 → **停止测试并询问用户**：
+
+> 目标组件未发现可跨越权限边界的攻击面。继续测试大概率只能产出**同权限域（不可越权）的中低危缺陷**（如不可信输入导致的用户级代码执行、持久化注入、同域接口破坏数据）。是否进入扩展模式？
+
+| 选项 | 行为 |
+|------|------|
+| ① 进入扩展模式 | 按下方「跨信任边界」标准评估，产出中低危报告 |
+| ② 停止（严格模式，**默认**） | 仅输出"未发现越权漏洞"结论 |
+| ③ 仅记录 | 记为观察项清单，不出正式漏洞报告 |
+
+询问一次，答复作为**本次会话开关**，并在结论/报告头部注明本次采用的判定标准。
+
+**扩展模式判定标准**：门槛从"跨权限边界"放宽为"**跨信任边界**"：
+
+- ✅ 计入：不可信输入（外部文件/文件名/URL/网络数据/同域其他进程的总线调用）→ 在受害者上下文执行代码、破坏或泄露数据（**攻击者 ≠ 受害者**）
+- ✅ 计入：同 UID 域内任意进程可调用且造成破坏的接口（攻击者可为同机受限进程）
+- ❌ 仍不计入：用户对自身配置/数据的自操作；无任何信任边界跨越的操作
+
+拒绝标准第 2 条随之**参数化**：严格模式 =「同权限域操作即拒绝」；扩展模式 =「仅『用户对自身资产的自操作』拒绝」。
+
+**定级与报告**：CVSS 3.1 照常逐项评分，预期等级 低危~中危（0.1–6.9），并**必须标注"不可越权"**、在漏洞信息表填写 `权限影响` 字段（详见 report-template.md）。
+
 ### 优先级策略
 
 **自研组件 > 开源组件**。kydima、ksaf、ukui、kysec、三权分立相关组件优先深挖。开源未修改的默认跳过。
+
+### 测试路径优先级：探测优先，逆向兜底
+
+**黑盒审计的主路径是探测**：枚举接口 → 以普通用户直接调用 → 系统级验证。静态逆向（反汇编/符号表/调试信息）**只在以下情况使用**：
+
+1. 接口已枚举但调用无结果、报错或行为不明，需要解释原因；
+2. 需要确认触发条件（配置门控、字段来源、函数/偏移定位）；
+3. 目标为纯本地二进制，无任何可调用接口。
+
+**禁止在接口枚举完成前进入反汇编**——逆向的作用是解释探测结果，不是取代探测。
+
+**反模式**：不得以未验证的假设（如"疑似走了安全路径"）终止探测。判定"不可达/非漏洞"之前，必须有一次系统级证据（`strace` 观测、文件/状态变化、报错分层）。
 
 ---
 
@@ -95,7 +138,9 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 | SUID/Cap | `find`/`getcap` 有输出 | 跳过 |
 | D-Bus | 有 D-Bus 策略文件或用户指定了服务 | 跳过 |
 | PolicyKit | 有 policy 文件或用户指定了 action | 跳过 |
-| 系统状态 diff | 有 `.service` 或 `.ko` 且可启动 | 跳过 |
+| 系统状态 diff | 有 `.service`/`.ko` 且可启动，**或为图形会话应用（可运行）** | 跳过 |
+| 会话总线 | 组件可运行（GUI/桌面应用常见） | 跳过 |
+| 非特权目标 | 权限摸底显示全部攻击面均在登录用户权限域内 | 触发扩展模式门控（见「可选扩展模式」） |
 | sudo/cron/Unix socket | 对应命令有输出 | 跳过 |
 
 ### 模式 A：组件驱动
@@ -107,8 +152,8 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 | A0 | 锁定组件边界 + 取文件清单（多形态探测见 component-discovery.md A0）|
 | A1 | 组件分类（内核模块/守护进程/工具/配置/库）|
 | A2 | 权限摸底（SUID/Cap/D-Bus/PolicyKit/配置）|
-| A3 | 启服前后 diff（netlink/securityfs/D-Bus/socket）|
-| A4 | 二进制分析（checksec/nm/strings/格式化字符串）|
+| A3 | 启服前后 diff（netlink/securityfs/系统总线 + 会话总线/socket）|
+| A4 | 二进制分析（checksec/nm/strings/格式化字符串）（探测无果时使用）|
 | A5 | strace 按 syscall 分类跟踪 |
 | A6 | 进入统一验证 |
 
@@ -116,13 +161,15 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 
 详见 [references/suid-analysis.md](references/suid-analysis.md)。
 
+> **仅当目标无任何可调用接口（纯本地二进制），或接口探测无果时，才以静态分析（B2-B4）为主**。若目标存在可调用接口，先按模式 C/E 探测；静态仅在需要解释探测结果时使用。
+
 | 步骤 | 内容 |
 |------|------|
 | B0 | 权限基线 |
 | B1 | 基本属性（file/ls -la/rpm -qf）|
-| B2 | 安全特性（checksec/readelf：CANARY/NX/PIE/RELRO）|
-| B3 | 导入函数（nm -D：system/popen/exec/sprintf/strcpy）|
-| B4 | 字符串分析（关键词 + 格式化字符串 + 文件路径）|
+| B2 | 安全特性（checksec/readelf：CANARY/NX/PIE/RELRO）（探测无果时使用）|
+| B3 | 导入函数（nm -D：system/popen/exec/sprintf/strcpy）（探测无果时使用）|
+| B4 | 字符串分析（关键词 + 格式化字符串 + 文件路径）（探测无果时使用）|
 | B5 | strace 按 syscall 分类跟踪 |
 | B6 | 进入统一验证 |
 
@@ -132,12 +179,14 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 
 | 步骤 | 内容 |
 |------|------|
-| C0 | 权限基线（XML Policy + PolicyKit action）|
-| C1 | `busctl tree` + `busctl introspect` + `busctl status` |
+| C0 | 权限基线（XML Policy + PolicyKit action + 会话总线默认策略）|
+| C1 | `busctl tree` + `busctl introspect` + `busctl status`（服务级 + 会话级）|
 | C2 | 关键词定级（P0-P3，详见 dbus-authz.md）|
-| C3 | 普通用户 `busctl --system call` 调用 |
+| C3 | 普通用户调用（系统总线 `--system` / 会话总线 `--user`）|
 | C4 | 系统级命令验证 |
 | C5 | 确认漏洞后，Python 深入利用（详见 deep-exploitation.md）|
+
+> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。
 
 ### 模式 D：PolicyKit 驱动
 
@@ -203,7 +252,7 @@ pkaction --action-id <action> --verbose | grep implicit
 # 步骤1：接口枚举 + 功能识别
 busctl introspect <服务> <路径>
 
-# 步骤2：普通用户调用
+# 步骤2：普通用户调用（系统总线 `--system`；会话总线服务改用 `busctl --user call`）
 busctl --system call <服务> <路径> <接口> <方法> <参数>
 
 # 步骤3：系统级验证 + 恢复
@@ -295,19 +344,28 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 - [ ] 测试范围未超出用户指定
 - [ ] 门禁检查已执行，不适用项已标注原因
 - [ ] 组件已执行后才做的运行时检查（D-Bus/端口/netlink）
+- [ ] **探测优先顺序已遵守**（接口枚举先于静态逆向；静态仅在探测无果时使用）
+- [ ] **会话总线已 diff**（组件启动前后 `busctl --user list` 对比）
+- [ ] **接口全量枚举**（`busctl tree` 的全部对象路径均已 `introspect`，无"根路径空即放弃"）
+- [ ] **无未验证假设终止探测**（"不可达/非漏洞"结论有系统级证据）
 - [ ] test-log.md 已记录关键步骤
 - [ ] 每漏洞产出 `<目标名>/vuln-00N/report.md + poc.<扩展名>`，编号连续
 - [ ] 文件写入 `<目标名>/`，未在用户工作目录留临时文件
 
 **模式 A**：
 - [ ] 组件边界已锁定（文件清单完整且归属校验通过），组件分类正确
-- [ ] 系统状态 diff 已执行
+- [ ] 系统状态 diff 已执行（含会话总线维度）
+- [ ] 非特权目标已触发扩展模式门控，开关状态已与用户确认
 
 **模式 B**：
+- [ ] 已确认目标无可用接口（或探测无果）后才以静态为主，并记录原因
 - [ ] checksec / nm -D / strings（含格式化字符串）/ strace 四步已完成
 
 **模式 C/D**：
 - [ ] P0/P1 方法已标记并测试，陌生术语已查背景
+- [ ] 全对象路径 × 接口 × 方法签名已枚举（含会话总线与 Qt 自动导出接口）
+- [ ] 参数逐字段 fuzz 已执行（数组/结构体元素、注入载荷）
+- [ ] 二阶/配置门控触发路径已评估（持久化载荷 + 重载 + 门控开关）
 - [ ] D-Bus 白名单管控：先确认受控（.limit/yaml + 报错分层）才评估绕过，LD_PRELOAD 优先，RootOnly 类直接放弃
 
 **模式 E**：

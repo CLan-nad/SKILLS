@@ -8,7 +8,7 @@ Linux 组件通过以下机制暴露攻击面，按组件类型匹配：
 
 | 通信机制 | 产生来源 | 发现命令 | 测试方向 |
 |---------|---------|---------|---------|
-| D-Bus | 守护进程 (.service) | `busctl --system list` | 方法枚举 → 策略审计 → 未授权调用 |
+| D-Bus | 守护进程 (.service) | `busctl --system list`（系统总线）/ `busctl --user list`（会话总线）| 方法枚举 → 策略审计 → 未授权调用；**逐对象路径枚举**（根路径空 ≠ 安全）|
 | Netlink | 内核模块 (.ko) | `cat /proc/net/netlink` | 协议号 → Python socket 交互 |
 | 系统调用 | SUID/Cap 二进制 | `strings`/`strace` | 危险函数 → 参数注入 → 权限绕过 |
 | Unix Socket | 守护进程 | `ss -xlpn` | 权限检查 → 连接测试 |
@@ -143,13 +143,17 @@ getcap <二进制路径>
 ### D-Bus 配置检查
 
 ```bash
-# 查找组件关联的 D-Bus 策略文件
+# 查找组件关联的 D-Bus 策略文件（系统总线 + 会话总线 + 激活文件）
 find /etc/dbus-1 /usr/share/dbus-1 -name "*<组件名>*" 2>/dev/null
 
 # 查看策略是否全局开放
 cat <dbus-policy-file> | grep -A5 'context="default"'
 # allow + 无限制 → 任何用户可调用
 # deny → 需要特定用户
+
+# 会话总线（GUI/桌面组件必查）——默认策略 = 同 UID 任意进程可调用
+find /etc/dbus-1/session.d /usr/share/dbus-1/services -name "*<组件名>*" 2>/dev/null
+busctl --user list | grep -i <组件名>
 ```
 
 ### PolicyKit 配置检查
@@ -246,6 +250,7 @@ curl http://127.0.0.1:<port>/ 2>&1 | head -20
 cat /proc/net/netlink > /tmp/before_netlink
 ls /sys/kernel/security/ > /tmp/before_secfs
 busctl --system list > /tmp/before_dbus
+busctl --user list > /tmp/before_user_dbus      # 会话总线（GUI/桌面组件必做）
 ss -elnp > /tmp/before_sockets
 
 # 2. 加载组件
@@ -253,24 +258,27 @@ ss -elnp > /tmp/before_sockets
 insmod <模块路径>
 # 或守护进程：
 systemctl start <服务名>
+# 或桌面/GUI 应用：直接以当前用户启动（会话总线服务随启动注册）
 
 # 3. 对比差异
 diff /tmp/before_netlink <(cat /proc/net/netlink)
 diff /tmp/before_secfs <(ls /sys/kernel/security/)
 diff /tmp/before_dbus <(busctl --system list)
+diff /tmp/before_user_dbus <(busctl --user list)
 diff /tmp/before_sockets <(ss -elnp)
 
 # 4. 清理
 rm /tmp/before_*
 ```
 
-### 四个维度的解读
+### 五个维度的解读
 
 | 维度 | 命令 | 新出现意味着什么 |
 |------|------|----------------|
 | netlink | `cat /proc/net/netlink` | 内核模块注册了 netlink 通信接口，用户态可通过 socket 与之交互 |
 | securityfs | `ls /sys/kernel/security/` | 内核模块在 securityfs 暴露了接口，读写可能影响安全策略 |
 | D-Bus | `busctl --system list` | 守护进程注册了新的 D-Bus 服务，枚举方法并测试授权 |
+| 会话总线 | `busctl --user list` | 组件注册了用户总线服务（GUI/桌面应用常见），**默认对同 UID 任意进程开放**；用 `tree` 枚举全部对象路径 |
 | 监听端口 | `ss -elnp` | 守护进程开启了监听 socket，检查是否为本地 only、是否有认证 |
 
 ### 对新出现的接口做后续测试
@@ -287,7 +295,8 @@ rm /tmp/before_*
   data = sock.recv(4096)  # 内核返回响应
   ```
 - **新 securityfs** → `cat`/`echo` 读写测试权限
-- **新 D-Bus 服务** → 进入 D-Bus 驱动模式（模式 C），枚举所有方法
+- **新 D-Bus 服务（系统总线）** → 进入 D-Bus 驱动模式（模式 C）；用 `busctl tree` 枚举**全部对象路径**，逐路径 `introspect`——根路径只返回 Introspectable/Peer **不等于**无攻击面
+- **新会话总线服务** → 同样进入模式 C，但用 `busctl --user` 系列命令；GUI/桌面组件常在此暴露控制接口，且 Qt 应用会自动导出 `org.qtproject.Qt.QWidget`（`close()`/`show()`/`hide()`）等免费接口
 - **新监听端口** → `curl`/`nc` 测试是否接受非本地连接
 
 ---
