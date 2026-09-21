@@ -311,7 +311,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 
 ### 报告
 
-按 [references/report-template.md](references/report-template.md) 的章节结构输出。**漏洞描述首句必须是加粗陈述句** `<组件> 存在 <漏洞类型> 漏洞`（如「kylin-video 组件存在不可信媒体文件名 SQL 注入漏洞」）；CVSS 3.1 逐项写依据；须含六阶段「验证情况」。
+按 [references/report-template.md](references/report-template.md) 的章节结构输出。漏洞描述首句用陈述句 `<组件> 存在 <漏洞类型> 漏洞`（**不加粗**；**不举例、不写具体组件名与漏洞类型**）；CVSS 3.1 写"向量 + 一行依据"；须含六阶段「验证情况」；**正文 ≤ 70 行**。
 
 ---
 

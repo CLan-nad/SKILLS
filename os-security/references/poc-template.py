@@ -60,10 +60,10 @@ def info(msg: str) -> None:
 
 
 # ---------------------------------------------------------------- 配置区
-TARGET_NAME = "kylin-video"                  # 组件名（用于标题/日志）
+TARGET_NAME = "example-app"                  # 组件名（用于标题/日志）
 TARGET_BIN = "/path/to/target-binary"        # 主二进制路径
 BIN_MD5 = ""                                 # 可选：预期 md5
-APP_NAME = "kylin-video"                     # 进程名（pgrep -x 用）
+APP_NAME = "example-app"                     # 进程名（pgrep -x 用）
 LAUNCH_CMD = ["/path/to/launcher"]           # 幂等自拉起的启动命令
 BUS_SERVICE = "org.example.Service"          # 会话总线服务名；无则留空 ""
 CONF_PATH = os.path.expanduser("~/.config/example/app.ini")  # 需备份/还原的配置
