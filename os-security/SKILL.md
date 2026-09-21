@@ -34,7 +34,7 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 |------|------|------|
 | **0. 权限基线** | 普通用户默认能做吗？ | 直接执行该操作，观察是否需要认证。**必须先做。** |
 | 1. 功能识别 | 这个二进制/策略/方法能做什么？ | `strings`、`strace`、`pkaction`、关键词映射 |
-| 2. 可达性 | 普通用户能调用吗？ | 以普通用户身份执行，确认 `id` 非 root |
+| 2. 可达性 | 普通用户能调用吗？ | **动态**：以普通用户身份执行，确认 `id` 非 root；**静态**：入口→…→sink 全引用形式回溯（见「可达性回溯：疑似 sink → 攻击者入口」）|
 | 3. 影响验证 | 操作真的生效了吗？ | 系统级命令验证，不依赖返回值 |
 | 4. 权限对比 | 绕过了本应存在的权限检查？ | 对比步骤 0 的基线 |
 
@@ -97,7 +97,38 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 
 **禁止在接口枚举完成前进入反汇编**——逆向的作用是解释探测结果，不是取代探测。
 
-**反模式**：不得以未验证的假设（如"疑似走了安全路径"）终止探测。判定"不可达/非漏洞"之前，必须有一次系统级证据（`strace` 观测、文件/状态变化、报错分层）。
+**反模式**：不得以未验证的假设（如"疑似走了安全路径"）终止探测。判定"不可达/非漏洞"之前，必须有一次系统级证据（`strace` 观测、文件/状态变化、报错分层）。**尤其禁止以"`grep call <sink>` 只找到一处"判定不可达**——信号/槽、回调、vtable 取的是函数地址，须按下方「可达性回溯」枚举全部六类引用形式。
+
+### 可达性回溯：疑似 sink → 攻击者入口
+
+逆向发现疑似危险汇点（`system`/`popen`/`exec*`/写文件/`unlink`…）后，**必须回溯它如何被进入**。
+只 grep 直接调用会漏判——信号/槽、回调、`std::function`、vtable 取的是**函数地址**，不是 `call`。
+
+**反模式（禁止）**：`grep 'call.*<sink>'` 只找到一处 → 据此判定"不可达 / 仅 GUI 可达"。
+
+**六类引用形式，逐一查（缺一即可能漏判）**：
+
+| # | 形式 | 命令 |
+|---|------|------|
+| a | 直接调用 | `grep -nE 'call.*<sym>' dis.txt` |
+| b | **取地址（最关键）** | `grep -nE '(lea\|mov\|push).*<sym>' dis.txt`；`readelf -rW <bin> \| grep <sym>`（`.data.rel.ro` 槽 = 指针表 / vtable / std::function） |
+| c | **Qt 信号/槽** | connect 站点 = 同一小段内同时出现"信号""槽"两个地址实参；`strings -a <bin> \| grep -E '^(1\|2)<name>\('`（moc 元对象 1signal/2slot）；旧式 `SIGNAL()/SLOT()`、`QMetaObject::invokeMethod` 同法 |
+| d | **D-Bus / Qt 自动导出** | `busctl --user tree/introspect`；`nm -C <bin> \| grep -E 'Adaptor\|registerObject\|closeEvent\|event\(\|timerEvent'`；`org.qtproject.Qt.QWidget.close()` → `QWidget::close` → `QCloseEvent` → `closeEvent()` |
+| e | 定时器/事件循环/队列 | `nm -C <bin> \| grep -E 'QTimer\|singleShot\|startTimer\|invokeMethod'`；`QueuedConnection` / `postEvent` |
+| f | 配置门控分支 | 见下方"门控溯源" |
+
+**回溯流程**：sink 符号 → 全形式引用 → 每条引用地址**回映射宿主函数**（`awk '/^[0-9a-f]+ <[^>]*>:/{fn=$0} /<ref_addr>/{print fn}' dis.txt`）→ 对宿主**递归**再问"谁进入它" → 终止于攻击者入口（D-Bus 方法 / Adaptor slot / 导出 event / main+argv / socket / 信号 emit），入口须**黑盒证实**。
+
+**门控溯源（键字符串 → 全局偏移 → 判定分支）**：
+
+```bash
+strings -t x <bin> | grep '<General/key>'                    # 键字符串 vaddr
+objdump -drwC -M intel <bin> | grep -nE 'lea.*# <vaddr>'      # 谁引用它（QSettings::value + toBool）
+# 赋值形态: lea key; call QSettings::value; call QVariant::toBool; mov %al,0x1a(%rbp) ← 0x1a 即偏移
+objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定分支
+```
+
+**判定"不可达"的证据要求**：① 六类引用形式逐一给出否定证据；② 至少一条黑盒证据（`strace` / 标记文件 / 状态变化）。
 
 ---
 
@@ -182,11 +213,12 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 | C0 | 权限基线（XML Policy + PolicyKit action + 会话总线默认策略）|
 | C1 | `busctl tree` + `busctl introspect` + `busctl status`（服务级 + 会话级）|
 | C2 | 关键词定级（P0-P3，详见 dbus-authz.md）|
+| C2.5 | 入口↔汇点可达性回溯（sink → 入口，见「可达性回溯：疑似 sink → 攻击者入口」）|
 | C3 | 普通用户调用（系统总线 `--system` / 会话总线 `--user`）|
 | C4 | 系统级命令验证 |
 | C5 | 确认漏洞后，Python 深入利用（详见 deep-exploitation.md）|
 
-> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。
+> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。注意 `QWidget.close()` 会落到 `closeEvent` 等事件入口，而 `closeEvent` 可能再 emit 信号触发清理/删除槽——必须把方法入口一路追到 sink（见「可达性回溯」）。
 
 ### 模式 D：PolicyKit 驱动
 
@@ -264,13 +296,22 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 
 ### 产物结构
 
-- 每漏洞一个目录：`<目标名>/vuln-00N/`，内含 `report.md` + `poc.<扩展名>`（POC 脚本语言按利用方式选择：Shell 用 `poc.sh`、Python 用 `poc.py`，不写死扩展名）。
+- 每漏洞一个目录：`<目标名>/vuln-00N/`，内含 `report.md` + `poc.py`（**Python 优先**；仅单条命令即可证明时才用 `poc.sh`）。骨架见 [references/poc-template.py](references/poc-template.py)。
 - 编号规则：`vuln-001`、`vuln-002`… 每组件从 001 递增，目录名与报告编号一致。
 - test-log 固定：`<目标名>/test-log.md`。
 
+### PoC 规范
+
+- **Python 优先**（`poc.py`），骨架见 [references/poc-template.py](references/poc-template.py)。
+- **彩色输出**：ANSI 常量 + `step()/ok()/bad()/info()` 助手；非 tty 自动降级无颜色。阶段划分与报告「验证情况」一致（Presence → Introspection → Reachability → Boundary → Impact → Cleanup）。
+- **末行必须是三态结论之一**（stdout 最后一行，便于批量采集）：`漏洞存在` / `漏洞不存在` / `poc 执行失败，请调整环境或改用其他方式验证`（退出码 0 / 1 / 2）。
+- **交付前必须实机执行并留证**：未跑通过的 PoC 不得写入报告。已知失败原因是目标进程未运行 → PoC 必须 `ensure_process()` **幂等自拉起**（探测 GUI 会话环境变量 + 等待总线服务注册后再继续）。
+- **自清理**：`finally` 还原配置/数据库（先备份）、删除标记文件、恢复原状态；报告「验证情况 · Cleanup」须给出清理后回显。
+- **验证不依赖接口返回值**：用系统级证据（标记文件 + `owner uid`、`strace -f -e trace=execve`）。
+
 ### 报告
 
-按 [references/report-template.md](references/report-template.md) 漏洞报告格式输出，CVSS 3.1 逐项写依据。
+按 [references/report-template.md](references/report-template.md) 的章节结构输出。**漏洞描述首句必须是加粗陈述句** `<组件> 存在 <漏洞类型> 漏洞`（如「kylin-video 组件存在不可信媒体文件名 SQL 注入漏洞」）；CVSS 3.1 逐项写依据；须含六阶段「验证情况」。
 
 ---
 
@@ -331,6 +372,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 | [references/polkit-authz.md](references/polkit-authz.md) | PolicyKit allow_active 审计、pkexec 用法 |
 | [references/deep-exploitation.md](references/deep-exploitation.md) | D-Bus 深入利用：白名单管控绕过四法（LD_PRELOAD 首选/bwrap/PYTHONPATH/ptrace）、任意文件写利用链、提权链 Python 模板、符号链接绕过 |
 | [references/report-template.md](references/report-template.md) | 漏洞报告模板、CVSS 3.1 严格评分指南、危害判定对照表 |
+| [references/poc-template.py](references/poc-template.py) | Python PoC 骨架：彩色输出、三态结论、幂等自拉起、自清理 |
 
 ---
 
@@ -349,7 +391,12 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 - [ ] **接口全量枚举**（`busctl tree` 的全部对象路径均已 `introspect`，无"根路径空即放弃"）
 - [ ] **无未验证假设终止探测**（"不可达/非漏洞"结论有系统级证据）
 - [ ] test-log.md 已记录关键步骤
-- [ ] 每漏洞产出 `<目标名>/vuln-00N/report.md + poc.<扩展名>`，编号连续
+- [ ] **疑似 sink 已做可达性回溯**（六类引用形式逐一查，尤其取地址/信号槽/D-Bus 导出）；"不可达"结论附否定证据 + 一条黑盒证据
+- [ ] 配置门控已溯源到「键 ↔ 全局偏移 ↔ 判定分支」
+- [ ] **PoC 已实机运行并留存输出**（幂等自拉起、自清理已还原）；未跑通过不得写入报告
+- [ ] 报告漏洞描述**首句**为 `<组件> 存在 <漏洞类型> 漏洞`
+- [ ] 报告含六阶段验证情况（Presence→Introspection→Reachability→Boundary→Impact→Cleanup）
+- [ ] 每漏洞产出 `<目标名>/vuln-00N/report.md + poc.py`，编号连续
 - [ ] 文件写入 `<目标名>/`，未在用户工作目录留临时文件
 
 **模式 A**：
