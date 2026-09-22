@@ -20,6 +20,12 @@ which strings file getcap busctl pkaction nm readelf strace ss 2>/dev/null  # �
 
 **规则**：禁止在用户工作目录下创建临时文件。临时文件一律用 `$TEMP` 或 `/tmp`，使用后清理。
 
+## 开工三条（先默读再动手）
+
+1. **次序**：枚举 → **参数注入首扫** → 系统级验证 → 静态仅兜底。**首扫未完成前，禁止进入反汇编。**
+2. **判定靠黑盒**：是否注入、是否经 shell，以 marker + owner uid 为准；逆向（objdump/nm/strings）只用来**定位**，不用来**判定**。
+3. **非破坏 + 非交互**：破坏性方法（reboot/restore/rm -rf）标"可达但不执行"；基线/对照一律非交互（勿用会弹密码的命令）。收尾跑「输出前自检」。
+
 ---
 
 ## 核心判断原则
@@ -32,10 +38,12 @@ which strings file getcap busctl pkaction nm readelf strace ss 2>/dev/null  # �
 
 | 步骤 | 问题 | 方法 |
 |------|------|------|
-| **0. 权限基线** | 普通用户默认能做吗？ | 直接执行该操作，观察是否需要认证。**必须先做。** |
+| **0. 权限基线** | 普通用户默认能做吗？ | 直接执行该操作，观察是否需要认证（**非交互**，勿用会弹密码的命令）。**必须先做。** |
 | 1. 功能识别 | 这个二进制/策略/方法能做什么？ | `strings`、`strace`、`pkaction`、关键词映射 |
-| 2. 可达性 | 普通用户能调用吗？ | **动态**：以普通用户身份执行，确认 `id` 非 root；**静态**：入口→…→sink 全引用形式回溯（见「可达性回溯：疑似 sink → 攻击者入口」）|
+| 2. 可达性 | 普通用户能调用吗？ | **动态**：以普通用户身份执行，确认 `id` 非 root |
+| 2.5 **参数注入首扫** | 字符串参数能否注入命令/SQL/路径？ | 对每个 `s/as/a{sv}` 参数打一轮载荷（marker + owner uid），**先于任何静态逆向**（见 dbus-authz.md「参数注入首扫」）|
 | 3. 影响验证 | 操作真的生效了吗？ | 系统级命令验证，不依赖返回值 |
+| 3.5 静态解释（可选） | 为什么会/不会这样？ | 入口→…→sink 全引用形式回溯（**仅当首扫无果或需解释时**，见「可达性回溯：疑似 sink → 攻击者入口」）|
 | 4. 权限对比 | 绕过了本应存在的权限检查？ | 对比步骤 0 的基线 |
 
 ### 什么不是漏洞（拒绝标准）
@@ -225,15 +233,15 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
 |------|------|
 | C0 | 权限基线 + **拓扑判定**（XML Policy + PolicyKit action + 会话总线默认策略；先判 system / session / **P2P**）|
 | C1 | `busctl tree` + `busctl introspect` + `busctl status`（服务级 + 会话级）；**`busctl` 找不到时用 `ss -xlnp` 找 P2P / 抽象套接字**（不在总线上者对 busctl 完全不可见）|
-| C1.5 | **对端 uid 校验检查**（P2P 专项：`g_credentials_get_unix_user` / `sd_bus_creds_get_euid` 等符号是否导入）+ **跨用户连接实测**（见 dbus-authz.md「第三种拓扑」）|
+| C1.5 | **跨用户连接实测**（P2P 专项，黑盒优先；见 dbus-authz.md「第三种拓扑」）+ 对端 uid 校验符号检查（`g_credentials_get_unix_user` / `sd_bus_creds_get_euid` 等，**仅用于解释结果**）|
 | C2 | 关键词定级（P0-P3，详见 dbus-authz.md）|
-| C2.5 | 入口↔汇点可达性回溯（sink → 入口，见「可达性回溯：疑似 sink → 攻击者入口」）|
-| C2.6 | **参数注入首扫（先于静态逆向）**：对每个 `s/as/a{sv}` 参数打一轮注入载荷，marker + owner uid 取证（详见 dbus-authz.md「参数注入首扫」）|
+| C2.5 | **参数注入首扫（先于静态逆向）**：对每个 `s/as/a{sv}` 参数打一轮注入载荷，marker + owner uid 取证（详见 dbus-authz.md「参数注入首扫」）|
+| C2.6 | 入口↔汇点可达性回溯（**仅当首扫无果或需解释时**；sink → 入口，见「可达性回溯：疑似 sink → 攻击者入口」）|
 | C3 | 普通用户调用（系统总线 `--system` / 会话总线 `--user`；**P2P 用 `new_for_address_sync`，跨用户加 `sudo -u nobody`**）|
 | C4 | 系统级命令验证 |
 | C5 | 确认漏洞后，Python 深入利用（详见 deep-exploitation.md）|
 
-> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。注意 `QWidget.close()` 会落到 `closeEvent` 等事件入口，而 `closeEvent` 可能再 emit 信号触发清理/删除槽——必须把方法入口一路追到 sink（见「可达性回溯」）。**另注意 D-Bus 有三种拓扑**：system / session / **点对点（P2P，无 daemon）**。P2P 服务 `busctl` 完全看不到，且 daemon 侧管控（XML Policy / limitCtl / polkit）一律缺席——那里跨用户**可测**，见 dbus-authz.md「第三种拓扑」。
+> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。注意 `QWidget.close()` 会落到 `closeEvent` 等事件入口，而 `closeEvent` 可能再 emit 信号触发清理/删除槽——必要时把方法入口一路追到 sink（**首扫之后的解释性步骤**，见「可达性回溯」）。**另注意 D-Bus 有三种拓扑**：system / session / **点对点（P2P，无 daemon）**。P2P 服务 `busctl` 完全看不到，且 daemon 侧管控（XML Policy / limitCtl / polkit）一律缺席——那里跨用户**可测**，见 dbus-authz.md「第三种拓扑」。
 
 ### 模式 D：PolicyKit 驱动
 
@@ -278,13 +286,15 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
 - 机制**未加载** → 配置缺陷（修：修配置/重新签名/开启强制），**不是**"绕过"。
 - 机制**已加载但仍可越权** → 才是绕过漏洞。
 
-POC 格式 —— SUID/能力（5 步）：
+POC 格式 —— SUID/能力（5 步；**基线一律非交互**——勿用会弹密码的命令，改用 `pkcheck --action-id <action> --process $$` / `login1 CanReboot` / 自建文件属主对照）：
 
 ```bash
 ## [P0/P1] <路径> — <说明>
 
-# 步骤0：权限基线
-<普通用户执行> 2>&1  # 应失败或需要认证
+# 步骤0：权限基线（非交互，勿触发密码弹窗）
+id
+<普通用户执行该操作的非交互等价形式> 2>&1   # 应被拒绝（权限不够 / Operation not permitted）
+# 需证"本应拦截"时用：pkcheck --action-id <action> --process $$   # rc=2 = 本应认证
 
 # 步骤1：功能识别
 strings <binary> | grep -iE '<关键词>'

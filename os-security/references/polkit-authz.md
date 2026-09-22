@@ -146,8 +146,8 @@ pkcheck --action-id <action> --process $$ 2>&1   # rc=2 "requires authentication
 # 验证 PolicyKit 操作是否实际生效
 # 根据具体操作类型选择验证命令
 
-# 例：switch_profile 验证
-busctl call com.redhat.tuned /Tuned com.redhat.tuned.control active_profile
+# 例：配置查询类方法（读回当前值，确认被改/被读）
+busctl --system call <服务名> <对象路径> <接口> <查询方法>
 
 # 例：用户操作验证
 id <username>

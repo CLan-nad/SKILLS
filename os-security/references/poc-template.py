@@ -22,7 +22,8 @@ Python PoC 骨架 —— os-security skill
   - 若把载荷**编码进文件名**（如 SQL 注入用 SQLite `char()` 拼接、避开 '/'），注意 Linux 文件名
     成分上限 **255 字节**——超长会 `OSError: File name too long`，需缩短载荷或标记路径
   - **点对点 / 抽象套接字 D-Bus**（服务不挂总线）：填 P2P_ADDR，且**不要**设 DBUS_SESSION_BUS_ADDRESS；
-    跨用户验证用 `sudo -u nobody python3 <本脚本>`。注意 **"方法可跨用户调用" ≠ "敏感数据可读 / 状态被改变"**
+    跨用户验证用换 uid 重跑（勿用会弹密码的命令：先 `sudo -n true` 探测，不可免密则
+    `setpriv --reuid=65534 --regid=65534 --clear-groups python3 <本脚本>`）。注意 **"方法可跨用户调用" ≠ "敏感数据可读 / 状态被改变"**
     ——机密性/完整性影响必须用实际返回值或副作用证明（返回空 `[]`、`issuccessful:false` 都不算已证实）
 """
 
@@ -72,7 +73,7 @@ APP_NAME = "example-app"                     # 进程名（pgrep -x 用）
 LAUNCH_CMD = ["/path/to/launcher"]           # 幂等自拉起的启动命令
 BUS_SERVICE = "org.example.Service"          # 会话总线服务名；无则留空 ""
 CONF_PATH = os.path.expanduser("~/.config/example/app.ini")  # 需备份/还原的配置
-MARKER = "/tmp/poc-marker"                   # 系统级验证标记（换成你的）
+MARKER = "/tmp/inj-marker"                   # 系统级验证标记（约定：/tmp/inj_*；多注入点用 MARKER_<tag>，cleanup 一并删除）
 
 # —— 点对点 / 直连 D-Bus 专用（P2P 不挂总线，与总线路径二选一；用哪个填哪个）——
 P2P_ADDR = ""                                # 如 "unix:abstract=/tmp/.example-<uid>.sock"；留空 = 走总线
@@ -137,10 +138,11 @@ def restore_conf() -> None:
 
 
 def cleanup() -> None:
-    """必须在 finally 调用：还原配置、删标记、停掉本次拉起的进程。"""
+    """必须在 finally 调用：还原配置、删标记（含 MARKER_<tag> 多标记）、停掉本次拉起的进程。"""
     try:
         restore_conf()
-        for f in (MARKER, CONF_BAK):
+        import glob as _glob
+        for f in [MARKER, CONF_BAK] + _glob.glob(MARKER + "_*"):
             try:
                 os.remove(f)
             except OSError:
@@ -165,7 +167,8 @@ def main() -> int:
 
     # ---- 阶段 2 Introspection：特性检查 ----
     step(2, "Introspection 特性检查")
-    info("TODO：枚举接口/方法、定位汇点与门控（objdump/nm/strings，见 SKILL.md『可达性回溯』）")
+    info("TODO：枚举接口/方法/参数；随后**立刻做「参数注入首扫」**（dbus-authz.md）")
+    info("     —— 任何 objdump/nm/strings 之前先 fuzz；静态仅当首扫无果或需解释时才用")
 
     # ---- 阶段 3 Reachability：可达性 ----
     step(3, "Reachability 可达性")
