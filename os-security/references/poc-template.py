@@ -167,8 +167,9 @@ def main() -> int:
 
     # ---- 阶段 2 Introspection：特性检查 ----
     step(2, "Introspection 特性检查")
-    info("TODO：枚举接口/方法/参数；随后**立刻做「参数注入首扫」**（dbus-authz.md）")
-    info("     —— 任何 objdump/nm/strings 之前先 fuzz；静态仅当首扫无果或需解释时才用")
+    info("TODO：枚举接口/方法/参数；随后**立刻以普通用户调用全部危险方法（未授权测试）**")
+    info("     —— 字符串实参直接用注入载荷（调用即注入，见 dbus-authz.md）")
+    info("     —— 任何 objdump/nm/strings 之前先调用；静态仅当调用无果或需解释时才用")
 
     # ---- 阶段 3 Reachability：可达性 ----
     step(3, "Reachability 可达性")
