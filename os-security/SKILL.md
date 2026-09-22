@@ -48,7 +48,13 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 4. **策略正确**：Polkit `modify.system` 配的是 `auth_admin`
 5. **开源一致**：开源组件配置与上游未修改
 
-**信息泄露专项**：读文件/接口返回信息 ≠ 信息泄露。先用 `cat`/`curl` 以普通用户直接试——本就 world-readable 的文件内容不是漏洞。
+**信息泄露专项（三分类，不得静默丢弃）**：先以 `cat`/`curl` 普通用户直接试，再按内容分类判定：
+
+- **A 设计公开**（版本/帮助/公共配置等本就面向所有用户的内容）→ **非漏洞**，但须在报告/记录写一行"已评估、非漏洞（设计公开）"，不得省略。
+- **B 敏感过度开放**（组件**私有数据目录**内文件 + **全局可读**（`-o=r`）+ 含用户名/UUID/路径/操作时间线/凭据/密钥等敏感内容）→ **独立低危编号**（CWE-732 权限配置不当 / CWE-200 信息暴露），等级按内容敏感度取（默认低危，含凭据/密钥则上调）。
+- **C 使能器**（泄露数据是**另一漏洞的必要输入**，如泄露的还原点 UUID 可触发无鉴权还原）→ 仍按 B 独立编号，并**交叉引用**所使能的漏洞、上调其优先级。
+
+> 可读性本身不构成越权（普通用户本就能 `cat`），故 B/C **不计为越权漏洞**，但**必须编号留痕**——禁止因"world-readable 即丢弃"而漏报。
 
 **Polkit 专项**：`modify.own` + `yes` = 正常。只有 `modify.system` + `yes` 才是漏洞。
 
@@ -98,6 +104,8 @@ which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确�
 **禁止在接口枚举完成前进入反汇编**——逆向的作用是解释探测结果，不是取代探测。
 
 **反模式**：不得以未验证的假设（如"疑似走了安全路径"）终止探测。判定"不可达/非漏洞"之前，必须有一次系统级证据（`strace` 观测、文件/状态变化、报错分层）。**尤其禁止以"`grep call <sink>` 只找到一处"判定不可达**——信号/槽、回调、vtable 取的是函数地址，须按下方「可达性回溯」枚举全部六类引用形式。
+
+**逆向止损线**：一旦探测已能支撑漏洞结论，即停止静态逆向；安全机制（白名单/Polkit/KYSEC 等）的**内部算法不深挖**——现象（如 journal 报 `corrupted`/`not loaded`）足以定位根因即可，余者转入报告「进一步分析建议」。判定"机制被绕过"前，先按「安全机制生效性核验」确认其已加载生效。
 
 ### 可达性回溯：疑似 sink → 攻击者入口
 
@@ -250,6 +258,19 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
 
 发现风险项后：步骤 0 权限基线 → 风险定级 → 可达性验证 → 系统级影响验证 → POC。
 
+#### 安全机制生效性核验（判"绕过"之前必做）
+
+判定"白名单/调用者校验/Polkit/KYSEC 被绕过"**之前**，必须先证明该机制**已加载生效**；否则"看似未拦截"可能只是"机制根本没加载"，根因与修法截然不同：
+
+| 机制 | 生效性证据 |
+|------|-----------|
+| D-Bus 调用者白名单（`.limit`）| journal 中 limitCtl 的 `Insert new file … successful` / `verify check successful`（反之 `corrupted, whitelist invalid` = 未加载） |
+| Polkit | `pkaction --action-id <id> --verbose` 输出 implicit 值；进程是否实际调用 `CheckAuthorization`（无该调用 = 未集成） |
+| KYSEC/ksaf | `cat /sys/kernel/security/ksaf/status`（强制模式位） |
+
+- 机制**未加载** → 配置缺陷（修：修配置/重新签名/开启强制），**不是**"绕过"。
+- 机制**已加载但仍可越权** → 才是绕过漏洞。
+
 POC 格式 —— SUID/能力（5 步）：
 
 ```bash
@@ -373,6 +394,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 | [references/deep-exploitation.md](references/deep-exploitation.md) | D-Bus 深入利用：白名单管控绕过四法（LD_PRELOAD 首选/bwrap/PYTHONPATH/ptrace）、任意文件写利用链、提权链 Python 模板、符号链接绕过 |
 | [references/report-template.md](references/report-template.md) | 漏洞报告模板、CVSS 3.1 严格评分指南、危害判定对照表 |
 | [references/poc-template.py](references/poc-template.py) | Python PoC 骨架：彩色输出、三态结论、幂等自拉起、自清理 |
+| [references/cvss31_calc.py](references/cvss31_calc.py) | CVSS 3.1 base-score 计算器（无依赖）；报告定稿前必跑并粘贴分数 |
 
 ---
 
@@ -398,6 +420,10 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 - [ ] 报告含六阶段验证情况（Presence→Introspection→Reachability→Boundary→Impact→Cleanup）
 - [ ] 每漏洞产出 `<目标名>/vuln-00N/report.md + poc.py`，编号连续
 - [ ] 文件写入 `<目标名>/`，未在用户工作目录留临时文件
+- [ ] **CVSS 分数由 `references/cvss31_calc.py` 复核并粘贴**（不手算）
+- [ ] **安全机制生效性已核验**（判"绕过"前已证明机制加载：limitCtl/polkit/ksaf）
+- [ ] **信息暴露已评估**（world-readable 敏感文件按三分类处理，无静默丢弃；非漏洞项亦写一行结论）
+- [ ] **静态声明 vs 运行时可达已记录**（D-Bus 方法逐个实测，声明存在但 UnknownMethod 的方法已标注）
 
 **模式 A**：
 - [ ] 组件边界已锁定（文件清单完整且归属校验通过），组件分类正确

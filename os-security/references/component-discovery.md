@@ -121,6 +121,8 @@ echo "$FILE_LIST" | grep '\.ko$'
 
 **判定**：落入组件清单 → 可测；否则记入"关联观察"，不测试、不赋编号、不进 POC。
 
+**配置 vs 执行器跨包规则**：一个实体可能由多包构成——**组件的配置文件**即使由**基础包进程**消费/执行，**仍属组件边界**（是本组件的文件、由组件包修复）。**逐实体按各自 `dpkg -S`/`rpm -qf` 归属**；**不得把执行/强制机制归属给未经验证的包**（须有 `dpkg -S <执行器路径>` 实证）。确需提及执行器时标"未验证归属"，且**不得据以改主送组件**。例：白名单配置 `.limit` 属本组件，其强制由 `dbus` 基础包完成——缺陷仍报给本组件，不报给某个臆测的"安全配置工具"包。
+
 ## A2：权限与接口摸底
 
 对组件安装的所有文件执行权限和接口检查：
@@ -254,6 +256,8 @@ ls /sys/kernel/security/ > /tmp/before_secfs
 busctl --system list > /tmp/before_dbus
 busctl --user list > /tmp/before_user_dbus      # 会话总线（GUI/桌面组件必做）
 ss -elnp > /tmp/before_sockets
+# 组件私有数据目录（日志/xml/清单常在此产生，且易被设为全局可读）
+find /var/lib/<组件名> /var/log /data /run -maxdepth 3 \( -path '*<组件名>*' -o -name '*<组件名>*' \) -printf '%M %u:%g %p\n' 2>/dev/null > /tmp/before_datadir
 
 # 2. 加载组件
 # 内核模块：
@@ -268,6 +272,7 @@ diff /tmp/before_secfs <(ls /sys/kernel/security/)
 diff /tmp/before_dbus <(busctl --system list)
 diff /tmp/before_user_dbus <(busctl --user list)
 diff /tmp/before_sockets <(ss -elnp)
+diff /tmp/before_datadir <(find /var/lib/<组件名> /var/log /data /run -maxdepth 3 \( -path '*<组件名>*' -o -name '*<组件名>*' \) -printf '%M %u:%g %p\n' 2>/dev/null)   # 新出现/权限变化的文件 → 按可读性查信息暴露
 
 # 4. 清理
 rm /tmp/before_*
@@ -311,6 +316,11 @@ ls -laR <配置目录> 2>/dev/null
 
 # 2. 检查是否有可写的配置文件
 find <配置目录> -writable -type f 2>/dev/null
+
+# 2b. 检查全局可读的敏感文件（组件私有数据目录内的日志/清单/xml）
+#     可读性本身不越权，但含敏感内容时按 SKILL.md「信息泄露专项」B 类编号
+find <组件数据目录> -perm -o=r -type f 2>/dev/null | xargs -r ls -la
+# 关注内容：用户名/UUID/路径/凭据/密钥；纯公开内容则写一行"非漏洞"
 
 # 3. 检查配置文件的属主和属组
 stat <配置文件路径>

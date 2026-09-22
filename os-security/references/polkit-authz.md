@@ -122,6 +122,26 @@ pkaction | grep -i kaiming
 
 ## 验证命令
 
+### 安全机制生效性核验（判"绕过"之前必做）
+
+判定"Polkit 被绕过/未授权"**之前**，先确认 Polkit 在该路径上**确实生效**——否则"无密码调用成功"可能只是"服务根本没调 Polkit"，根因不同（配置缺陷 vs 绕过）：
+
+```bash
+# 1. action 存在且本应拦截（implicit_active 非 yes 才算"本应拦截"）
+pkaction --action-id <action> --verbose | grep "implicit active"
+
+# 2. 进程是否真的发起 Polkit 鉴权（D-Bus 服务不调用 CheckAuthorization = 未集成 = 无鉴权）
+strings <daemon> | grep -iE 'PolicyKit|CheckAuthorization|polkit'   # 无命中 = 未集成
+
+# 3. action 是否对普通调用方本应拦截（pkcheck 模拟，非交互）
+pkcheck --action-id <action> --process $$ 2>&1   # rc=2 "requires authentication" = 本应拦截
+```
+
+- **未集成/未加载** → 配置缺陷（修：服务端接入 Polkit），**不是**绕过。
+- **已集成但仍可越权** → 才是绕过漏洞。
+
+### 业务级验证
+
 ```bash
 # 验证 PolicyKit 操作是否实际生效
 # 根据具体操作类型选择验证命令
