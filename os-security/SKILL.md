@@ -20,31 +20,81 @@ which strings file getcap busctl pkaction nm readelf strace ss 2>/dev/null  # �
 
 **规则**：禁止在用户工作目录下创建临时文件。临时文件一律用 `$TEMP` 或 `/tmp`，使用后清理。
 
+## 总流程图
+
+```
+用户给定目标
+   │
+   ├─ 目标不存在 → 结论：目标不存在（见「结论输出」）
+   │
+   ▼
+[0] 基线：非交互权限对照 + 审计边界锁定（归属校验）＋ 执行组件
+   │
+   ▼
+[1] 枚举：门禁检查逐面确认适用 → 接口/方法/参数/文件全列出
+   │       （模式路由：A 组件 / B 二进制 / C D-Bus / D PolicyKit / E 配置）
+   ▼
+[2] 定级：命名→功能→危险度，危险方法优先
+   │
+   ▼
+[3] 未授权调用 ★核心：以普通用户逐个执行对应操作
+   │       字符串实参 = 注入载荷（「调用即注入」）
+   │       AccessDenied = 被拦截 → 换下一个攻击面
+   │
+   ├─ 载荷未生效 → [3.5] 换形重试（' 逃逸 / $() / 反引号 / ${IFS} / 换行）
+   ▼
+[4] 系统级验证：marker + owner uid / 状态变化 / strace（不依赖返回值）
+   │
+   ├─ 需要解释 → [4.5] 可达性回溯（静态兜底，只定位不判定）
+   ▼
+[5] 交付：深入利用（非破坏）→ PoC（三态结论）→ 报告
+        → 收尾清理清单 → test-log 覆盖小结
+```
+
 ## 开工三条（先默读再动手）
 
-1. **次序**：枚举 → 关键词定级 → **未授权调用（字符串实参=注入载荷）** → 系统级验证 → 静态仅兜底。**未完成调用前，禁止进入反汇编。**
+1. **次序**：严格按「主流程」执行——**未完成未授权调用前，禁止进入反汇编**。
 2. **判定靠黑盒**：是否注入、是否经 shell，以 marker + owner uid 为准；逆向（objdump/nm/strings）只用来**定位**，不用来**判定**。
-3. **非破坏 + 非交互**：破坏性方法（reboot/restore/rm -rf）标"可达但不执行"；基线/对照一律非交互（勿用会弹密码的命令）。收尾跑「输出前自检」。
+3. **非破坏 + 非交互**：破坏性方法（reboot/restore/rm -rf）标"可达但不执行"；基线/对照一律非交互（勿用会弹密码的命令）。收尾必跑「收尾清理清单」与「输出前自检」。
 
 ---
 
-## 核心判断原则
+## 判定原则
 
 ### 什么是漏洞
 
 **普通用户能否通过 SUID/Cap/D-Bus/PolicyKit 执行原本需要 root 的操作？能 = 漏洞。**
 
-判定流程（必须按顺序）：
+### 主流程（唯一权威次序）
 
-| 步骤 | 问题 | 方法 |
-|------|------|------|
-| **0. 权限基线** | 普通用户默认能做吗？ | 直接执行该操作，观察是否需要认证（**非交互**，勿用会弹密码的命令）。**必须先做。** |
-| 1. 功能识别 | 这个二进制/策略/方法能做什么？ | `strings`、`strace`、`pkaction`、关键词映射 |
-| 2. 可达性 / 未授权 | 普通用户能调用吗？ | **动态**：按命名推测功能、以普通用户调用对应操作（确认 `id` 非 root）；返回 AccessDenied = 被拦截 |
-| 2.5 **参数注入（调用即注入）** | 字符串参数能否注入命令/SQL/路径？ | 调用时字符串实参直接用注入载荷——一次调用同测未授权与注入（marker + owner uid，先于任何静态逆向；见 dbus-authz.md「调用即注入」）|
-| 3. 影响验证 | 操作真的生效了吗？ | 系统级命令验证，不依赖返回值 |
-| 3.5 静态解释（可选） | 为什么会/不会这样？ | 入口→…→sink 全引用形式回溯（**仅当调用/注入均无果或需解释时**，见「可达性回溯：疑似 sink → 攻击者入口」）|
-| 4. 权限对比 | 绕过了本应存在的权限检查？ | 对比步骤 0 的基线 |
+> 本表是次序/方法论的**唯一全文**；「开工三条」「输出前自检」「references」中凡涉及次序处一律为指针，不得复述。
+
+| 阶段 | 问题 | 做什么 | 出口 / 检查点 ✓ |
+|------|------|--------|----------------|
+| **0 基线** | 普通用户默认能做吗？ | 非交互对照：`pkcheck --action-id <action> --process $$`（rc=2=本应拦截）/ `login1 CanReboot` / 自建文件属主对照；同时锁定**审计边界**（归属校验，见下） | ✓ 目标存在且可运行；不可运行 → 记原因，只测静态项，按「目标不可运行」结论输出 |
+| **1 枚举** | 攻击面有哪些？ | 按「门禁检查」逐面确认适用；接口/方法/参数/文件全列出；**组件先运行**（不运行=白测） | ✓ 门禁表逐面有结论（适用/跳过+原因）；✓ 全量枚举无"根路径空即放弃" |
+| **2 定级** | 先测什么？ | 命名→功能→危险度（统一 P0–P3，见 dbus-authz.md 关键词映射） | ✓ 危险方法排在调用序列最前 |
+| **3 未授权调用 ★** | 拦不拦？ | 以普通用户**逐个执行对应操作**；**字符串实参直接用注入载荷**（「调用即注入」，见 dbus-authz.md）——一次调用同时回答"是否未授权"与"是否注入" | AccessDenied = 被拦截 → 换面；✓ 无鉴权即记漏洞；✓ 每个方法记录返回分层 |
+| 3.5 换形重试 | 载荷为何未生效？ | 按被拼模板的**引号形态**换形：`'` 逃逸 / `$( )` / 反引号 / `${IFS}` / 换行 | ✓ "无注入"结论满足证据标准（载荷确已到达执行点；前置失败=inconclusive） |
+| **4 系统级验证** | 真生效了吗？ | marker + owner uid / 状态变化 / `strace -f -e trace=execve`；**不依赖接口返回值** | ✓ "方法可调用"与"影响已证实"分开取证 |
+| **4.5 静态解释（可选）** | 为什么？ | 「可达性回溯」（六类引用形式）；**仅当调用/注入均无果或需解释时** | ✓ 逆向只定位不判定；黑盒一旦给出答案即停 |
+| **5 交付** | — | 深入利用（非破坏）→ PoC（三态结论）→ 报告 → 收尾清理 → 覆盖小结 | ✓ 收尾清理清单已跑；✓ test-log 状态表完整 |
+
+**模式差异**（各模式在上述阶段中的特有步骤，详见对应 reference）：
+
+- **A 组件**：0=A0 边界+文件清单（component-discovery.md）；1=A1 分类 + A2 权限摸底 + A3 启服前后 diff（netlink/securityfs/系统总线/会话总线/socket/**数据目录**）；4.5 前可做 A4 二进制分析（探测无果时）。
+- **B 二进制**：1=B1.5 **argv 参数首扫**（对每个可取字符串的命令行参数打一轮注入载荷，先于 checksec/nm/strings）；4.5=checksec/nm/strings 仅兜底（suid-analysis.md）；纯本地无接口才以静态为主。
+- **C D-Bus**：0=C0 **拓扑判定**（system/session/P2P）；1=C1 全量 `tree/introspect` + C1.5 P2P 跨用户连接实测；3=调用即注入（dbus-authz.md）。
+- **D PolicyKit**：0=D0 `pkaction`；2=D1 对比同服务其他 action；3=D2 `pkexec`/无密码调用（polkit-authz.md）。
+- **E 配置**：0=E0 权限（`ls -la`/`getfacl`）；1=E1 注入点（路径/命令/ExecStart）；4=E3 备份后修改观察行为。
+
+**硬禁令**：
+- **枚举后未完成一轮未授权调用（含注入载荷实参）前，禁止进入反汇编**；
+- **逆向不跨函数追机制**（不得从一个汇点的调用方式外推另一个汇点）。
+
+**反模式**：不得以未验证的假设（如"疑似走了安全路径"）终止探测——"不可达/非漏洞"结论必须有系统级证据。**禁止以"`grep call <sink>` 只找到一处"判定不可达**（六类引用形式见「可达性回溯」）。**同样禁止把"载荷未执行"当"不会执行"**——载荷因前置失败提前返回 = 结论无效（inconclusive），不是"无注入"。
+
+**逆向止损线**：一旦探测已能支撑漏洞结论，即停止静态逆向；安全机制（白名单/Polkit/KYSEC 等）的内部算法不深挖——现象（如 journal 报 `corrupted`/`not loaded`）足以定位根因即可，余者转入报告「进一步分析建议」。判定"机制被绕过"前，先按「安全机制生效性核验」确认其已加载生效。
 
 ### 什么不是漏洞（拒绝标准）
 
@@ -54,7 +104,7 @@ which strings file getcap busctl pkaction nm readelf strace ss 2>/dev/null  # �
 2. **默认权限**：普通用户不依赖任何提权机制即可执行
 3. **操作拦截**：执行失败或无实际效果
 4. **策略正确**：Polkit `modify.system` 配的是 `auth_admin`
-5. **开源一致**：开源组件配置与上游未修改
+5. **开源一致**：开源组件**经 diff 上游/查厂商补丁确认未修改**（验证程序：比对包版本与上游 tag → 抽查关键文件 md5/diff → 查发行版补丁目录；确认一致才跳过，厂商打过补丁的按自研对待）
 
 **信息泄露专项（三分类，不得静默丢弃）**：先以 `cat`/`curl` 普通用户直接试，再按内容分类判定：
 
@@ -99,26 +149,7 @@ which strings file getcap busctl pkaction nm readelf strace ss 2>/dev/null  # �
 
 ### 优先级策略
 
-**自研组件 > 开源组件**。kydima、ksaf、ukui、kysec、三权分立相关组件优先深挖。开源未修改的默认跳过。
-
-### 测试路径优先级：探测优先，逆向兜底
-
-**黑盒审计的主路径是探测，且"探测" = 枚举 + 未授权调用（调用即注入）**。强制次序：
-
-1. **① 枚举**：接口/方法/参数全部列出；
-2. **② 未授权调用（先于一切静态分析）**：按命名推测功能，以普通用户**逐个执行对应操作**；**字符串实参直接用注入载荷**（见 dbus-authz.md「调用即注入」）——一次调用同时回答"是否未授权"与"是否注入"，通常几分钟即定论；载荷未生效且无 AccessDenied 时按模板引号换形重试；
-3. **③ 系统级验证**：以 marker + owner uid / 状态变化取证；
-4. **④ 静态逆向**：仅当 ② 无果、或需解释原因/定位触发条件（配置门控、字段来源）时才用；纯本地无任何可调用接口的二进制才以静态为主。
-
-**逆向能力边界（硬约束）**：无 IDA/Ghidra/反编译器时，逆向（objdump/nm/strings）**只用于"定位"**（哪个方法、哪个参数流入哪个 sink），**不用于"判定"**（是否经 shell、是否转义、是否安全）——**判定一律以黑盒探测结果为准**。
-
-**两条硬禁令**：
-- **枚举后未完成一轮未授权调用（含注入载荷实参）前，禁止进入反汇编**；
-- **逆向不跨函数追机制**（不得从一个汇点的调用方式外推另一个汇点）；黑盒一旦给出答案即停。
-
-**反模式**：不得以未验证的假设（如"疑似走了安全路径"）终止探测。判定"不可达/非漏洞"之前，必须有一次系统级证据（`strace` 观测、文件/状态变化、报错分层）。**尤其禁止以"`grep call <sink>` 只找到一处"判定不可达**——信号/槽、回调、vtable 取的是函数地址，须按下方「可达性回溯」枚举全部六类引用形式。**同样禁止把"载荷未执行"当"不会执行"**——载荷若因前置失败提前返回，结论是"无效（inconclusive）"而非"无注入"（证据标准见 dbus-authz.md）。
-
-**逆向止损线**：一旦探测已能支撑漏洞结论，即停止静态逆向；安全机制（白名单/Polkit/KYSEC 等）的**内部算法不深挖**——现象（如 journal 报 `corrupted`/`not loaded`）足以定位根因即可，余者转入报告「进一步分析建议」。判定"机制被绕过"前，先按「安全机制生效性核验」确认其已加载生效。
+**自研组件 > 开源组件**。kydima、ksaf、ukui、kysec、三权分立相关组件优先深挖。开源组件**先按拒绝标准第 5 条的验证程序确认未修改**才跳过。
 
 ### 可达性回溯：疑似 sink → 攻击者入口
 
@@ -153,20 +184,20 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
 
 ---
 
-## 入口识别与执行流程
-
-### 识别入口类型
+## 入口识别与模式路由
 
 ```
 用户输入
-  ├─ 组件名        → 模式 A：组件全流程
-  ├─ 二进制路径     → 模式 B：二进制驱动
-  ├─ D-Bus 服务名   → 模式 C：D-Bus 驱动
-  ├─ PolicyKit action → 模式 D：PolicyKit 驱动
-  └─ 配置文件路径    → 模式 E：配置文件驱动
+  ├─ 组件名        → 模式 A → references/component-discovery.md
+  ├─ 二进制路径     → 模式 B → references/suid-analysis.md
+  ├─ D-Bus 服务名   → 模式 C → references/dbus-authz.md
+  ├─ PolicyKit action → 模式 D → references/polkit-authz.md
+  └─ 配置文件路径    → 模式 E → references/component-discovery.md「配置文件审计」
 ```
 
-### 审计边界（必须先做）
+各模式在主流程中的差异见上「主流程 · 模式差异」；确认漏洞后的跨面利用链见 [references/exploit-patterns.md](references/exploit-patterns.md)。
+
+## 审计边界（必须先做）
 
 **目标组件的唯一标识**：源码包名 / 应用 ID / 用户给定的路径。**审计范围 = 该标识直接归属的文件、进程、服务、策略。**
 
@@ -176,105 +207,39 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
   - D-Bus/PolicyKit：策略文件是否以组件唯一标识命名（`find /etc/dbus-1 /usr/share/dbus-1 /usr/share/polkit-1 -name "*<标识>*"`）
   - 挂载/沙箱：是否由组件自身的配置（文件清单内的配置、包声明文件）产生
   - 校验结果属于本组件 → 可测；不属于 → 归"关联观察"，不测试
+- **配置 vs 执行器跨包**：逐实体按各自 `dpkg -S`/`rpm -qf` 归属；组件的配置文件即使由**基础包进程**消费，**仍属组件边界**（由组件包修）；**不得把执行/强制机制归属给未经验证的包**。
 
 ### 前置步骤：执行组件
 
-**不运行就测试等于白测。** 有 `.service` → `systemctl start`。有 `.ko` → `insmod`/`modprobe`。已在运行的检查状态即可。无法启动的记录原因，跳过运行时测试只测静态项。
+**不运行就测试等于白测。** 有 `.service` → `systemctl start`。有 `.ko` → `insmod`/`modprobe`。已在运行的检查状态即可。无法启动的记录原因、跳过运行时测试只测静态项，并按「结论输出 · 目标不可运行」收尾。
 
 ### 门禁检查
 
-每个攻击面先确认适用性，不适用则跳过：
+每个攻击面先确认适用性，不适用则跳过（结论写一行原因，记入 test-log 状态表）：
 
 | 攻击面 | 有意义的条件 | 不满足则 |
 |--------|------------|---------|
 | SUID/Cap | `find`/`getcap` 有输出 | 跳过 |
 | D-Bus | 有 D-Bus 策略文件、或用户指定了服务、**或组件有自己的私有 socket（抽象 / 文件系统）** | 跳过 |
+| D-Bus 激活文件 | `/usr/share/dbus-1/system-services/<服务>.service` 存在 → **检查其 `Exec=`/`User=` 字段可写性与注入** | 跳过 |
 | PolicyKit | 有 policy 文件或用户指定了 action | 跳过 |
+| systemd unit | 组件有 `.service`/`.timer`（含 `~/.config/systemd/user/`）→ **检查可写性与 ExecStart/Environment= 注入** | 跳过 |
+| udev 规则 | 组件带 `/etc/udev/rules.d/*` 或 `RUN=` 引用组件程序 → 检查规则与程序可写性 | 跳过 |
+| 桌面入口 | `.desktop`/MimeType/自启动项以组件为 `Exec` → 检查可写性与参数注入 | 跳过 |
 | 系统状态 diff | 有 `.service`/`.ko` 且可启动，**或为图形会话应用（可运行）** | 跳过 |
 | 会话总线 | 组件可运行（GUI/桌面应用常见） | 跳过 |
-| 非特权目标 | 权限摸底显示全部攻击面均在登录用户权限域内 | 触发扩展模式门控（见「可选扩展模式」） |
+| 非特权目标 | 权限摸底显示全部攻击面均在登录用户权限域内 | 触发扩展模式门控 |
 | sudo/cron/Unix socket | 对应命令有输出（**抽象套接字用 `ss -xlnp` 查，`find -type s` 看不到**）| 跳过 |
-
-### 模式 A：组件驱动
-
-详见 [references/component-discovery.md](references/component-discovery.md)。**先读其中的 A0-A2 锁定审计边界，再继续。**
-
-| 步骤 | 内容 |
-|------|------|
-| A0 | 锁定组件边界 + 取文件清单（多形态探测见 component-discovery.md A0）|
-| A1 | 组件分类（内核模块/守护进程/工具/配置/库）|
-| A2 | 权限摸底（SUID/Cap/D-Bus/PolicyKit/配置）|
-| A3 | 启服前后 diff（netlink/securityfs/系统总线 + 会话总线/socket）|
-| A4 | 二进制分析（checksec/nm/strings/格式化字符串）（探测无果时使用）|
-| A5 | strace 按 syscall 分类跟踪 |
-| A6 | 进入统一验证 |
-
-### 模式 B：二进制驱动
-
-详见 [references/suid-analysis.md](references/suid-analysis.md)。
-
-> **仅当目标无任何可调用接口（纯本地二进制），或接口探测无果时，才以静态分析（B2-B4）为主**。若目标存在可调用接口，先按模式 C/E 探测；静态仅在需要解释探测结果时使用。
-
-| 步骤 | 内容 |
-|------|------|
-| B0 | 权限基线 |
-| B1 | 基本属性（file/ls -la/rpm -qf）|
-| B1.5 | **参数首扫（argv 注入）**：对每个可取字符串的命令行参数打一轮注入载荷（marker + owner uid），先于 B2-B4 静态分析 |
-| B2 | 安全特性（checksec/readelf：CANARY/NX/PIE/RELRO）（探测无果时使用）|
-| B3 | 导入函数（nm -D：system/popen/exec/sprintf/strcpy）（探测无果时使用）|
-| B4 | 字符串分析（关键词 + 格式化字符串 + 文件路径）（探测无果时使用）|
-| B5 | strace 按 syscall 分类跟踪 |
-| B6 | 进入统一验证 |
-
-### 模式 C：D-Bus 驱动
-
-详见 [references/dbus-authz.md](references/dbus-authz.md)。
-
-| 步骤 | 内容 |
-|------|------|
-| C0 | 权限基线 + **拓扑判定**（XML Policy + PolicyKit action + 会话总线默认策略；先判 system / session / **P2P**）|
-| C1 | `busctl tree` + `busctl introspect` + `busctl status`（服务级 + 会话级）；**`busctl` 找不到时用 `ss -xlnp` 找 P2P / 抽象套接字**（不在总线上者对 busctl 完全不可见）|
-| C1.5 | **跨用户连接实测**（P2P 专项，黑盒优先；见 dbus-authz.md「第三种拓扑」）+ 对端 uid 校验符号检查（`g_credentials_get_unix_user` / `sd_bus_creds_get_euid` 等，**仅用于解释结果**）|
-| C2 | 关键词定级（命名→功能→危险度 P0-P3，详见 dbus-authz.md；**据此排调用次序，危险方法优先**）|
-| C3 | **普通用户调用（未授权测试）**：按命名推测功能、逐个调用危险方法（系统总线 `--system` / 会话总线 `--user`；**P2P 用 `new_for_address_sync`，跨用户加 `sudo -u nobody`**）；**字符串实参直接用注入载荷**——一次调用同时测未授权与注入（见 dbus-authz.md「调用即注入」）|
-| C3.5 | **注入换形重试**：载荷未生效且无 AccessDenied 时，按模板引号形态换形（`'` 逃逸 / `$()` / 反引号 / `${IFS}` / 换行）；"无注入"结论须满足证据标准（见 dbus-authz.md）|
-| C4 | 系统级命令验证 |
-| C4.5 | 入口↔汇点可达性回溯（**仅当调用/注入均无果或需解释时**；sink → 入口，见「可达性回溯：疑似 sink → 攻击者入口」）|
-| C5 | 确认漏洞后，Python 深入利用（详见 deep-exploitation.md）|
-
-> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。注意 `QWidget.close()` 会落到 `closeEvent` 等事件入口，而 `closeEvent` 可能再 emit 信号触发清理/删除槽——必要时把方法入口一路追到 sink（**调用之后的解释性步骤**，见「可达性回溯」）。**另注意 D-Bus 有三种拓扑**：system / session / **点对点（P2P，无 daemon）**。P2P 服务 `busctl` 完全看不到，且 daemon 侧管控（XML Policy / limitCtl / polkit）一律缺席——那里跨用户**可测**，见 dbus-authz.md「第三种拓扑」。
-
-### 模式 D：PolicyKit 驱动
-
-详见 [references/polkit-authz.md](references/polkit-authz.md)。
-
-| 步骤 | 内容 |
-|------|------|
-| D0 | `pkaction --verbose` 查 allow_active |
-| D1 | 对比同服务其他 action |
-| D2 | `pkexec` 或 D-Bus 无密码调用测试 |
-| D3 | 系统级命令验证 |
-
-### 模式 E：配置文件驱动
-
-| 步骤 | 内容 |
-|------|------|
-| E0 | `ls -la`/`getfacl` 权限检查 |
-| E1 | 查找可注入字段（路径、命令、ExecStart）|
-| E2 | `ps`/`systemctl` 查关联进程 |
-| E3 | 如可写，修改后观察系统行为 |
-
-所有模式最终汇入统一验证和报告。
 
 ---
 
-## 统一验证与报告
+## 统一验证与交付
 
-### 验证
+### 验证次序
 
-发现风险项后：步骤 0 权限基线 → 风险定级 → 可达性验证 → 系统级影响验证 → POC。
+见「主流程」阶段 0→5；确认漏洞后进入深入利用（[references/exploit-patterns.md](references/exploit-patterns.md)）。
 
-#### 安全机制生效性核验（判"绕过"之前必做）
+### 安全机制生效性核验（判"绕过"之前必做）
 
 判定"白名单/调用者校验/Polkit/KYSEC 被绕过"**之前**，必须先证明该机制**已加载生效**；否则"看似未拦截"可能只是"机制根本没加载"，根因与修法截然不同：
 
@@ -287,62 +252,13 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
 - 机制**未加载** → 配置缺陷（修：修配置/重新签名/开启强制），**不是**"绕过"。
 - 机制**已加载但仍可越权** → 才是绕过漏洞。
 
-POC 格式 —— SUID/能力（5 步；**基线一律非交互**——勿用会弹密码的命令，改用 `pkcheck --action-id <action> --process $$` / `login1 CanReboot` / 自建文件属主对照）：
-
-```bash
-## [P0/P1] <路径> — <说明>
-
-# 步骤0：权限基线（非交互，勿触发密码弹窗）
-id
-<普通用户执行该操作的非交互等价形式> 2>&1   # 应被拒绝（权限不够 / Operation not permitted）
-# 需证"本应拦截"时用：pkcheck --action-id <action> --process $$   # rc=2 = 本应认证
-
-# 步骤1：功能识别
-strings <binary> | grep -iE '<关键词>'
-file <binary>
-
-# 步骤2：可达性
-id  # 确认普通用户
-<binary> <参数>
-
-# 步骤3：系统级验证（不依赖返回值）
-<系统级验证命令>
-
-# 步骤4：权限对比
-# 对比步骤0基线：是否绕过权限？
-```
-
-POC 格式 —— D-Bus/PolicyKit（4 步）：
-
-```bash
-## [P0/P1] <方法名> — <说明>
-
-# 步骤0：权限基线
-pkaction --action-id <action> --verbose | grep implicit
-
-# 步骤1：接口枚举 + 功能识别
-busctl introspect <服务> <路径>
-
-# 步骤2：普通用户调用（系统总线 `--system`；会话总线服务改用 `busctl --user call`）
-busctl --system call <服务> <路径> <接口> <方法> <参数>
-#   P2P/直连服务不挂总线 → busctl 不可用，改用：
-#   Gio.DBusConnection.new_for_address_sync('unix:abstract=<名>', ...) + conn.call_sync(...)
-#   跨用户测试：把整段连接+调用脚本用 `sudo -u nobody python3` 再跑一次
-
-# 步骤3：系统级验证 + 恢复
-<系统级验证命令>
-<恢复命令>
-```
-
-D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](references/deep-exploitation.md)：白名单管控绕过（**遇到管控才绕，不上来就绕；LD_PRELOAD 优先**，bwrap/PYTHONPATH 限宽松服务，ptrace 替补）、任意文件写（SSH key/cron/systemd/sudoers.d/PAM）、路径穿越、提权链。
-
 ### 产物结构
 
-- 每漏洞一个目录：`<目标名>/vuln-00N/`，内含 `report.md` + `poc.py`（**Python 优先**；仅单条命令即可证明时才用 `poc.sh`）。骨架见 [references/poc-template.py](references/poc-template.py)。
-- 编号规则：`vuln-001`、`vuln-002`… 每组件从 001 递增，目录名与报告编号一致。
-- test-log 固定：`<目标名>/test-log.md`。
+- 每漏洞一个目录：`<目标名>/vuln-00N/`，内含 `report.md` + `poc.py`（**Python 优先**；仅单条命令即可证明时才用 `poc.sh`）。骨架与变体见 [references/poc-template.py](references/poc-template.py)（含 SUID/D-Bus/P2P/文件写/二阶注入变体）。
+- 编号规则：`vuln-001`、`vuln-002`… 每组件从 001 递增，目录名与报告编号一致；越权与信息暴露类**统一编号，仅以危害等级区分**。
+- test-log 固定：`<目标名>/test-log.md`（结构见「测试过程记录」）。
 
-### PoC 规范
+### PoC 规范（交付唯一规范；poc-template.py 文件头为指针复述）
 
 - **Python 优先**（`poc.py`），骨架见 [references/poc-template.py](references/poc-template.py)。
 - **彩色输出**：ANSI 常量 + `step()/ok()/bad()/info()` 助手；非 tty 自动降级无颜色。**阶段可合并、不强凑六段**（如 Presence+Introspection 合并、Reachability/Boundary 内联为 Impact 中一行 uid 与对照）——报告「验证情况」仍须覆盖六阶段的内容。
@@ -351,18 +267,26 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 - **Impact 覆盖尽可能多的可达危险方法**（批量演示多个注入点/多个特权方法）；破坏性方法标注"**可达但不执行（系统稳定性）**"及其对应 root 命令。
 - **末行必须是三态结论之一**（stdout 最后一行，便于批量采集）：`漏洞存在` / `漏洞不存在` / `poc 执行失败，请调整环境或改用其他方式验证`（退出码 0 / 1 / 2）。
 - **交付前必须实机执行并留证**：未跑通过的 PoC 不得写入报告。已知失败原因是目标进程未运行 → PoC 必须 `ensure_process()` **幂等自拉起**（探测 GUI 会话环境变量 + 等待总线服务注册后再继续）。
-- **自清理**：`finally` 还原配置/数据库（先备份）、删除标记文件、恢复原状态；报告「验证情况 · Cleanup」须给出清理后回显。
+- **自清理**：`finally` 还原配置/数据库（先备份）、删除标记文件（含 `MARKER_*` 多标记）、恢复原状态；报告「验证情况 · Cleanup」须给出清理后回显。
 - **验证不依赖接口返回值**：用系统级证据（标记文件 + `owner uid`、`strace -f -e trace=execve`）。
+- **跨用户命令勿弹密码**：先 `sudo -n true` 探测；不可免密改 `setpriv --reuid=65534 --regid=65534 --clear-groups <cmd>`。
+- 注入批量探测可用 [references/inj_sweep.py](references/inj_sweep.py)（五形载荷 × 字段 × marker+owner uid 自动核对）。
 
 ### 报告
 
-按 [references/report-template.md](references/report-template.md) 的章节结构输出。漏洞描述首句用陈述句 `<组件> 存在 <漏洞类型> 漏洞`（**不加粗**；**不举例、不写具体组件名与漏洞类型**）；CVSS 3.1 写"向量 + 一行依据"；须含六阶段「验证情况」；**正文 ≤ 70 行**。
+按 [references/report-template.md](references/report-template.md) 的章节结构输出。漏洞描述首句用陈述句 `<组件> 存在 <漏洞类型> 漏洞`（**不加粗**；**不举例、不写具体组件名与漏洞类型**）；CVSS 3.1 写"向量 + 一行依据"且**必须经 `cvss31_calc.py` 复核**；须含六阶段「验证情况」；**正文 ≤ 70 行**。
 
----
+### 收尾清理清单（每次审计必跑）
 
-## 结论输出
+审计过程本身的残留不受 per-PoC `finally` 覆盖，收尾必须显式处理：
 
-### 目标不存在
+1. **枚举本次产生的变更**：拉起/激活的进程与总线服务、root 属主产物（`find /tmp /run -user root -newermt '<审计开始时间>'`）、改过的配置（有备份则还原）、`/tmp/inj_*` 标记。
+2. **尽力还原**：停掉本次拉起的服务（组件自身的 stop 接口 / 让系统回收）；还原配置；删 cl 属主临时文件。
+3. **无法还原的列成清单交操作者**（root 属主文件、孤儿 root 进程），附一行 sudo 命令；同步登记到 test-log「残留登记册」。
+
+### 结论输出
+
+#### 目标不存在
 
 ```markdown
 ## 审计结论
@@ -371,38 +295,58 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 目标不存在，无法测试。建议确认路径或授权全量扫描。
 ```
 
-### 未发现漏洞
+#### 目标不可运行
+
+```markdown
+## 审计结论
+- **目标**：<名称>  |  **模式**：<A-E>  |  **系统**：<uname -a>
+- **结论**：目标无法运行（<原因：启动失败/无入口/权限>），仅完成静态项测试。
+- **静态项结果**：<逐项：策略/配置/权限检查结论>
+- **覆盖小结**：N/M 攻击面已测，X 跳过（原因）。
+```
+
+#### 未发现漏洞
 
 ```markdown
 ## 审计结论
 - **目标**：<名称>  |  **模式**：<A-E>  |  **系统**：<uname -a>
 - **审计范围**：<简述>
 - **结论**：未发现漏洞。<逐项写原因>
+- **覆盖小结**：N/M 攻击面已测，X 跳过（原因）；信息暴露已按三分类评估（A 类一行结论）。
 > 如怀疑存在深层逻辑漏洞，可提供源码进一步分析。
 ```
 
-### 发现漏洞
+#### 发现漏洞
 
-按 report-template.md 完整输出（vuln 编号 + 漏洞信息表 + 内部/外部概述 + 漏洞原因 + POC + 修复建议）。
+按 report-template.md 完整输出（vuln 编号 + 漏洞信息表 + 内部/外部概述 + 漏洞原因 + POC + 修复建议），并在结论尾部附**覆盖小结**（N/M 攻击面已测，X 跳过及原因）。
 
----
+### 测试过程记录（结构化 test-log，支持断点续跑）
 
-## 测试过程记录
-
-关键步骤写入 `<目标名>/test-log.md`：
+写入 `<目标名>/test-log.md`，**固定结构**（中断后按状态表续跑）：
 
 ```markdown
 # 测试记录 — <目标名>
+
 ## 目标信息
-## 门禁检查
-| 攻击面 | 状态 |
+组件/版本/系统/md5（环境指纹）
+
+## 攻击面状态表（断点续跑依据）
+| 攻击面 | 状态 | 结论/原因 |
+|--------|------|-----------|
+| SUID/Cap | 已测/跳过/待办/发现 | … |
+| D-Bus | … | … |
+
+## 残留登记册
+| 类型 | 位置/命令 | 还原状态 |
+|------|-----------|---------|
+
 ## 关键步骤
 ### <攻击面>
 `<命令>` → `<关键响应>`
 → 结论
 ```
 
-原则：只记关键步骤、门禁跳过的写一行原因。
+原则：只记关键步骤；门禁跳过写一行原因；**状态表在每完成一个攻击面后更新**。
 
 ---
 
@@ -410,71 +354,51 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 
 | 文件 | 内容 |
 |------|------|
-| [references/component-discovery.md](references/component-discovery.md) | 组件信息收集、通信机制速查、系统状态对比、配置/sudo/cron/Unix socket 审计 |
-| [references/suid-analysis.md](references/suid-analysis.md) | SUID 五步判定、二进制逆向（checksec/nm/strace）、GTFOBins、PATH 劫持 |
-| [references/cap-analysis.md](references/cap-analysis.md) | 能力组合风险矩阵、进程内代码执行注入（LD_PRELOAD / Qt 插件目录劫持） |
-| [references/dbus-authz.md](references/dbus-authz.md) | D-Bus 方法关键词映射（P0-P3）、决策树、参数注入探测、白名单管控识别、验证命令、**第三种拓扑（P2P / 抽象套接字）跨用户越权** |
-| [references/polkit-authz.md](references/polkit-authz.md) | PolicyKit allow_active 审计、pkexec 用法 |
-| [references/deep-exploitation.md](references/deep-exploitation.md) | D-Bus 深入利用：白名单管控绕过四法（LD_PRELOAD 首选/bwrap/PYTHONPATH/ptrace）、任意文件写利用链、提权链 Python 模板、符号链接绕过 |
-| [references/report-template.md](references/report-template.md) | 漏洞报告模板、CVSS 3.1 严格评分指南、危害判定对照表 |
-| [references/poc-template.py](references/poc-template.py) | Python PoC 骨架：彩色输出、三态结论、幂等自拉起、自清理 |
-| [references/cvss31_calc.py](references/cvss31_calc.py) | CVSS 3.1 base-score 计算器（无依赖）；报告定稿前必跑并粘贴分数 |
+| [references/component-discovery.md](references/component-discovery.md) | 模式 A/E：组件发现与攻击面枚举、状态对比、配置/sudo/cron/udev/systemd unit/desktop/socket 审计 |
+| [references/suid-analysis.md](references/suid-analysis.md) | 模式 B：SUID 五步判定、二进制逆向（checksec/nm/strace）、GTFOBins、PATH 劫持 |
+| [references/cap-analysis.md](references/cap-analysis.md) | 能力组合风险矩阵（含 setfcap/net_admin 等）、进程内代码执行注入 |
+| [references/dbus-authz.md](references/dbus-authz.md) | 模式 C：三种拓扑（system/session/**P2P 抽象套接字**）、关键词定级、调用即注入、白名单管控与绕过、二阶注入、激活文件 `Exec=` 注入 |
+| [references/polkit-authz.md](references/polkit-authz.md) | 模式 D：PolicyKit allow_active 审计、pkexec 用法 |
+| [references/exploit-patterns.md](references/exploit-patterns.md) | 确认漏洞后的跨面利用链：任意文件写（SSH key/cron/systemd/sudoers.d/PAM）、路径穿越、符号链接、提权链 |
+| [references/report-template.md](references/report-template.md) | 漏洞报告模板、CVSS 3.1 严格评分指南、危害判定对照表、唯一填写示例 |
+| [references/poc-template.py](references/poc-template.py) | Python PoC 骨架与变体（SUID/D-Bus/P2P/文件写/二阶注入） |
+| [references/cvss31_calc.py](references/cvss31_calc.py) | CVSS 3.1 base-score 计算器（无依赖）；报告定稿前必跑 |
+| [references/inj_sweep.py](references/inj_sweep.py) | 注入批量扫描器：五形载荷 × 字段 × marker+owner uid 自动核对 |
 
 ---
 
-## 输出前自检
+## 输出前自检（按主流程阶段分组）
 
-**所有模式**：
-- [ ] 步骤 0 权限基线已完成
-- [ ] 系统级命令验证，未依赖返回值
-- [ ] CVSS 评分逐项有依据
-- [ ] 审计边界已锁定，清单外实体仅记为关联观察、未测试
-- [ ] 测试范围未超出用户指定
-- [ ] 门禁检查已执行，不适用项已标注原因
-- [ ] 组件已执行后才做的运行时检查（D-Bus/端口/netlink）
-- [ ] **探测优先顺序已遵守**（枚举 → 关键词定级 → 未授权调用（实参=注入载荷）→ 系统级验证 → 静态仅兜底；**未完成调用前未进入反汇编**）
-- [ ] **未授权调用已完成**（全部危险方法逐个以普通用户调用；字符串实参已用注入载荷并记录 marker/owner uid）
-- [ ] **每个"无注入"结论满足证据标准**（载荷确已到达执行点：构造命令见于日志 / strace 见 execve / 补齐前置后仍无 marker；前置失败 = 结论无效，不得记为"无注入"）
-- [ ] **会话总线已 diff**（组件启动前后 `busctl --user list` 对比）
-- [ ] **接口全量枚举**（`busctl tree` 的全部对象路径均已 `introspect`，无"根路径空即放弃"）
+**枚举完成时（阶段 1 出口）**：
+- [ ] 审计边界已锁定（归属校验通过；配置 vs 执行器跨包已按规则归属），清单外实体仅记为关联观察
+- [ ] 门禁检查逐面有结论，不适用项已标注原因并记入 test-log 状态表
+- [ ] 组件已执行后才做的运行时检查（D-Bus/端口/netlink/会话总线 diff/数据目录 diff）
+- [ ] **接口全量枚举**（`busctl tree` 全部对象路径均 `introspect`，无"根路径空即放弃"）
 - [ ] **D-Bus 拓扑已判定**（system / session / P2P）；`busctl` 找不到时已用 `ss -xlnp` 补查抽象 / P2P 套接字
-- [ ] **P2P 跨用户已实测**（换 uid 连接）；`ECONNREFUSED` 已排除为"无监听者"，未记为安全结论
-- [ ] **"方法可调用"与"影响已证实"已分开取证**（返回空 / 操作失败不计为影响已证实）
-- [ ] **无未验证假设终止探测**（"不可达/非漏洞"结论有系统级证据）
-- [ ] test-log.md 已记录关键步骤
-- [ ] **疑似 sink 已做可达性回溯**（六类引用形式逐一查，尤其取地址/信号槽/D-Bus 导出）；"不可达"结论附否定证据 + 一条黑盒证据
-- [ ] 配置门控已溯源到「键 ↔ 全局偏移 ↔ 判定分支」
+- [ ] D-Bus 激活文件 `.service` 的 `Exec=`/`User=` 已检查可写性与注入
+- [ ] systemd unit / udev 规则 / 桌面入口已按门禁表检查
+- [ ] test-log 状态表已初始化
+
+**未授权调用完成时（阶段 3 出口）**：
+- [ ] **次序已遵守**（枚举 → 定级 → 未授权调用（实参=注入载荷）→ 系统级验证 → 静态仅兜底；**未完成调用前未进入反汇编**）
+- [ ] **未授权调用已完成**（全部危险方法逐个以普通用户调用；字符串实参已用注入载荷并记录 marker/owner uid）
+- [ ] **每个"无注入"结论满足证据标准**（载荷确已到达执行点；前置失败 = 结论无效，不得记为"无注入"）
+- [ ] **P2P 跨用户已实测**（换 uid 连接，非交互）；`ECONNREFUSED` 已排除为"无监听者"
+- [ ] **"方法可调用"与"影响已证实"已分开取证**；**无未验证假设终止探测**
+- [ ] **安全机制生效性已核验**（判"绕过"前已证明机制加载）
+- [ ] **静态声明 vs 运行时可达已记录**（声明存在但 UnknownMethod 的方法已标注）
+- [ ] **信息暴露已评估**（world-readable 敏感文件按三分类处理，无静默丢弃）
+
+**产出前（阶段 5 出口）**：
+- [ ] 步骤 0 权限基线（非交互）已完成；系统级验证未依赖返回值
 - [ ] **PoC 已实机运行并留存输出**（幂等自拉起、自清理已还原）；未跑通过不得写入报告
-- [ ] 报告漏洞描述**首句**为 `<组件> 存在 <漏洞类型> 漏洞`
-- [ ] 报告含六阶段验证情况（Presence→Introspection→Reachability→Boundary→Impact→Cleanup）
+- [ ] 报告：首句陈述句、六阶段验证情况、正文 ≤70 行、CVSS 经 `cvss31_calc.py` 复核并粘贴
 - [ ] 每漏洞产出 `<目标名>/vuln-00N/report.md + poc.py`，编号连续
-- [ ] 文件写入 `<目标名>/`，未在用户工作目录留临时文件
-- [ ] **CVSS 分数由 `references/cvss31_calc.py` 复核并粘贴**（不手算）
-- [ ] **安全机制生效性已核验**（判"绕过"前已证明机制加载：limitCtl/polkit/ksaf）
-- [ ] **信息暴露已评估**（world-readable 敏感文件按三分类处理，无静默丢弃；非漏洞项亦写一行结论）
-- [ ] **静态声明 vs 运行时可达已记录**（D-Bus 方法逐个实测，声明存在但 UnknownMethod 的方法已标注）
-
-**模式 A**：
-- [ ] 组件边界已锁定（文件清单完整且归属校验通过），组件分类正确
-- [ ] 系统状态 diff 已执行（含会话总线维度）
-- [ ] 非特权目标已触发扩展模式门控，开关状态已与用户确认
-
-**模式 B**：
-- [ ] 已确认目标无可用接口（或探测无果）后才以静态为主，并记录原因
-- [ ] checksec / nm -D / strings（含格式化字符串）/ strace 四步已完成
-
-**模式 C/D**：
-- [ ] P0/P1 方法已标记并测试，陌生术语已查背景
-- [ ] 全对象路径 × 接口 × 方法签名已枚举（含会话总线与 Qt 自动导出接口）
-- [ ] **P2P / 抽象套接字已纳入**：`busctl` 未命中时用 `ss -xlnp` 补查；已检查对端 uid 校验符号（`g_credentials_get_unix_user` / `sd_bus_creds_get_euid`）并做跨用户连接实测
-- [ ] 参数深挖 fuzz 已评估（数组/结构体逐元素、二阶/存储型、组合载荷；基础「调用即注入」见"所有模式"）
-- [ ] 二阶/配置门控触发路径已评估（持久化载荷 + 重载 + 门控开关）
-- [ ] D-Bus 白名单管控：先确认受控（.limit/yaml + 报错分层）才评估绕过，LD_PRELOAD 优先，RootOnly 类直接放弃
-
-**模式 E**：
-- [ ] 权限和注入点已检查
+- [ ] **收尾清理清单已跑**；无法还原的残留已列清单 + sudo 命令，并登记 test-log 残留登记册
+- [ ] test-log 状态表/覆盖小结完整；文件写入 `<目标名>/`，未在用户工作目录留临时文件
+- [ ] 非特权目标已触发扩展模式门控，开关状态已与用户确认（本次会话）
 
 **结论**：
-- [ ] 有漏洞 → 完整 POC + CVSS 依据 + 修复建议
-- [ ] 无漏洞 → 写清原因，不强挖，不自行扩大范围
-- [ ] 目标不存在 → 已报告，未自行扩展扫描
+- [ ] 有漏洞 → 完整 POC + CVSS 依据 + 修复建议 + 覆盖小结
+- [ ] 无漏洞 → 写清原因与覆盖小结，不强挖，不自行扩大范围
+- [ ] 目标不存在/不可运行 → 已按对应模板输出

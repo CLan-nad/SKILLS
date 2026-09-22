@@ -31,6 +31,13 @@ python3 -c "print(bin(<cap-value>))"
 | `cap_net_raw` | 使用原始套接字，可能用于网络攻击 |
 | `cap_sys_boot` | 重启系统 |
 | `cap_setuid` | 设置 UID，可提权 |
+| `cap_setfcap` | 可给任意文件**授予能力**（含把 `cap_dac_override` 给自己的工具）→ 权限自我复制 |
+| `cap_net_admin` | 网络栈管理：改路由/iptables/创建隧道，流量劫持与隔离绕过 |
+| `cap_audit_write` | 可写审计日志（伪造/注水），掩盖行为 |
+| `cap_sys_chroot` | chroot 逃逸（经典 `chroot` + 双 chroot 技巧 → 宿主文件系统） |
+| `cap_bpf` / `cap_sys_admin`+BPF | 加载 eBPF 程序 → 内核态代码执行/提权 |
+
+> 定级词汇统一：本文件 P0/P1/P2 与 suid-analysis、dbus-authz 的 P0–P3 同义（**优先级排序**，非 CVSS 等级）；报告定级一律按 report-template.md 的 CVSS 流程。
 
 ## 能力组合风险分析
 

@@ -8,7 +8,7 @@ Linux 组件通过以下机制暴露攻击面，按组件类型匹配：
 
 | 通信机制 | 产生来源 | 发现命令 | 测试方向 |
 |---------|---------|---------|---------|
-| D-Bus | 守护进程 (.service) | `busctl --system list`（系统总线）/ `busctl --user list`（会话总线）| 方法枚举 → 策略审计 → 未授权调用；**逐对象路径枚举**（根路径空 ≠ 安全）|
+| D-Bus | 守护进程 (.service) | `busctl --system list`（系统总线）/ `busctl --user list`（会话总线）| 按 SKILL.md「主流程」执行（定级→未授权调用）；**逐对象路径枚举**（根路径空 ≠ 安全）|
 | Netlink | 内核模块 (.ko) | `cat /proc/net/netlink` | 协议号 → Python socket 交互 |
 | 系统调用 | SUID/Cap 二进制 | `strings`/`strace` | 危险函数 → 参数注入 → 权限绕过 |
 | Unix Socket | 守护进程 | `ss -xlnp`（**`@` 打头 = 抽象套接字；`find -type s` 看不到**）| 文件系统 → 权限检查；**抽象 → 对端 uid 校验 + 跨用户连接**；**P2P D-Bus 服务 `busctl` 完全看不到** |
@@ -232,31 +232,57 @@ nc -U <socket_path> 2>&1
 # 普通用户能连接且无认证 → 可能未授权访问
 ```
 
-**两类套接字的权限模型完全不同，必须分开处理：**
+**两类套接字的权限模型完全不同**：文件系统套接字查父目录 + 文件权限；**抽象套接字**（`@` 开头）**无文件系统节点 → 任何本地 uid 都能连**，唯一门禁 = 服务端校验对端 uid（`SO_PEERCRED`）。
+**抽象套接字的发现、跨用户测试与 ECONNREFUSED 陷阱，唯一全文见 [dbus-authz.md](dbus-authz.md)「第三种拓扑」**（本节不复述）。
 
-| 类型 | `ss` 中的样子 | 权限 | 测试方向 |
-|------|-------------|------|---------|
-| 文件系统 | `/run/.../x.sock`（真路径） | 有 mode/owner；`connect()` 需穿过父目录 + 对文件有写权限 | 查父目录 + 文件权限，看普通用户能否连 |
-| **抽象** | **`@/tmp/...x.sock`** | **无文件系统节点 → 无 mode/owner → 内核跳过权限检查 → 任何本地 uid 都能连** | **只能靠服务端校验对端 uid**（见下） |
-
-**抽象套接字要点**：
-
-- 名字活在**内核抽象命名空间**，`bind()` **不创建文件**。名字**可以含 `/`**，所以长得像路径——但 `ls` / `find -type s` 都找不到它。
-- 因此**没有任何文件权限可查**（"检查 socket 文件权限"对抽象套接字无意义）。
-- 唯一可能的门禁 = 服务端自己校验**对端凭证**（`SO_PEERCRED`：内核在建立连接时给出的 pid/uid/gid，不可伪造）。
-- **隔离的正确做法**（对照学习）：文件系统套接字 + per-uid `0700` 目录。会话总线就是这么隔离的——`/run/user/<uid>` 是 `drwx------`，因此别的用户连它的 `/run/user/<uid>/bus` 只会得到 `Permission denied`。
-- **点对点（P2P）D-Bus 服务**用 `GDBusServer` 直接 `bind()` 一个套接字（常见为抽象），**不挂任何总线 → `busctl` 完全看不到它**。发现、判定与跨用户测试见 [dbus-authz.md](dbus-authz.md)「第三种拓扑：点对点（P2P）/ 直连 D-Bus（无 daemon）」。
-
-**跨用户连接测试**（抽象套接字）：换一个 uid 去连，看是否成功。
+### systemd unit 审计
 
 ```bash
-# 本用户基线（Python 字符串里的 \0 前缀 = 抽象套接字）
-python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('\0<抽象套接字名>');print('CONNECTED')"
-# 换用户：成功 = 该套接字对全体本地用户开放（跨用户可达）
-sudo -u nobody python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('\0<抽象套接字名>');print('CONNECTED')"
+# 组件清单内的 unit（系统级 + 用户级）
+ls -la /etc/systemd/system/<组件>* /usr/lib/systemd/system/<组件>* \
+       ~/.config/systemd/user/<组件>* 2>/dev/null
+
+# 危险信号（任一命中即注入面）：
+#   unit 文件本身普通用户可写（-rw-rw-rw- 或属主为登录用户且以 root 运行）
+#   ExecStart/ExecStartPre/ExecStop 指向可写脚本或含未引用变量
+#   Environment=/EnvironmentFile= 指向可写文件
+#   Type=oneshot + ExecStart=/bin/sh -c '...'（shell 串联）
+ls -la "$(grep -h '^ExecStart=' <unit文件> | awk '{print $1}' | cut -d= -f2 | xargs -r which 2>/dev/null)" 2>/dev/null
+
+# 触发验证（改后）：
+systemctl daemon-reload && systemctl restart <unit>   # 仅在已确认可写且已备份后
 ```
 
-> **`ECONNREFUSED` 不等于"被拒绝"**：抽象套接字报 `Connection refused` 表示**没有监听者**（按需服务可能已空闲自停），**不得记为安全结论**；真正的"被拒绝"是 `Permission denied`（EACCES）。
+### udev 规则审计
+
+```bash
+# 组件清单内的规则（或 RUN= 引用组件程序）
+ls -la /etc/udev/rules.d/<组件>* /usr/lib/udev/rules.d/<组件>* 2>/dev/null
+grep -rE 'RUN+=' /etc/udev/rules.d/ /usr/lib/udev/rules.d/ 2>/dev/null | grep -i <组件名>
+
+# 危险信号：
+#   规则文件普通用户可写 → 改 RUN+= 为任意命令，root 在事件触发时执行
+#   RUN+= 指向可写脚本 → 注入脚本内容
+#   规则里含 PROGRAM+= 且输出被 %c 引用进 RUN（输出注入）
+# 触发：udevadm trigger <匹配的子系统/设备>（验证后还原规则）
+```
+
+### 桌面入口审计（.desktop / MimeType / 自启动）
+
+```bash
+# 组件的桌面入口与自启动项
+ls -la /usr/share/applications/<组件>*.desktop ~/.config/autostart/<组件>*.desktop \
+       /etc/xdg/autostart/<组件>*.desktop 2>/dev/null
+
+# 危险信号：
+#   .desktop 文件普通用户可写 → 改 Exec= 为任意命令（谁点谁执行，root 场景即提权）
+#   Exec= 含未引用 $VAR / 反引号（desktop 文件支持 $ 展开）
+#   MimeType 注册为默认处理器 + Exec=%u/%f → 恶意文件名/路径注入（配合"不可信文件名"链）
+grep -E '^(Exec|MimeType|TryExec)=' <组件>.desktop
+
+# 自启动注入验证：写非破坏标记 Exec= 到 ~/.config/autostart/<tag>.desktop
+#   → 注销重登 / systemctl --user start <对应.target> → marker + owner uid 取证
+```
 
 ### loopback 网络服务审计
 
@@ -367,3 +393,55 @@ rm -f <配置目录>/test_write
 - 普通用户可写配置文件 → 高价值目标，可注入恶意配置
 - 配置目录可写 → 可新建配置文件（即使原文件不可写）
 - 配置中如果有 `ExecStart`/`command`/`script` 等字段 → 可注入命令
+
+---
+
+## 模式 E：配置文件审计（E0–E3 专项）
+
+> 次序遵循 SKILL.md「主流程」；本节是模式 E 的技术细节。配置可写 = "未授权写"能力的另一来源，利用链见 [exploit-patterns.md](exploit-patterns.md)。
+
+### E0 权限与属主（`ls -la` / `getfacl`）
+
+见上方「配置文件权限专项检查」；另查 `getfacl`（ACL 可能比 mode 更宽）、属组（users 组可写 = 等同可写）、**属主为登录用户但被 root 进程消费**（`~/.config` 被 root service 读取 → 注入即 root 执行）。
+
+### E1 注入点识别
+
+| 字段形态 | 注入方式 | 消费方 |
+|---------|---------|--------|
+| `ExecStart=`/`Exec=`/`command=` | 直接换命令/加 `;`/`&&` 串联 | systemd / 桌面 / D-Bus 激活 |
+| `script`/`run` 路径 | 改指向可写脚本或改脚本内容 | 事件触发 |
+| 键值型（`key=value`） | 写入会被拼进命令的值 | 组件解析后 exec |
+| 包含 `$VAR`/反引号 | 置环境变量/命令替换 | shell 展开型消费者 |
+
+### E2 关联进程与消费方
+
+```bash
+ps -eo pid,user,cmd | grep -E '<组件|配置名>'     # 谁在读这份配置
+systemctl list-units --all | grep -i <组件>        # 哪个 unit 引用它
+grep -rl '<配置路径>' /etc/systemd /usr/share/dbus-1 2>/dev/null   # 谁的 Exec 指向它
+```
+
+### E3 备份 → 注入 → 触发 → 还原
+
+```bash
+cp <配置> /tmp/poc-conf.bak
+# 注入非破坏载荷：ExecStart=/bin/sh -c 'touch /tmp/inj_<tag>;#'（或对应字段）
+systemctl daemon-reload && systemctl restart <unit>   # 或等对应触发
+ls -la /tmp/inj_<tag>                                  # marker + owner uid 取证
+cp /tmp/poc-conf.bak <配置> && systemctl daemon-reload  # finally 还原
+```
+
+---
+
+## 内核模块参数审计（模块类组件）
+
+```bash
+# 模块参数常可写且被内核消费
+ls /sys/module/<模块名>/parameters/ 2>/dev/null
+cat /sys/module/<模块名>/parameters/<参数>          # 当前值
+[ -w /sys/module/<模块名>/parameters/<参数> ] && echo "可写"
+
+# 危险信号：可写参数被驱动用于决定行为（如 debug 开关打开信息泄露、
+# 参数被拼进内核命令/固件路径）。写非破坏值验证后还原。
+echo <非破坏测试值> > /sys/module/<模块名>/parameters/<参数>
+```

