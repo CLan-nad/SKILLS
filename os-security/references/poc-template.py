@@ -14,8 +14,10 @@ Python PoC 骨架 —— os-security skill
 
 约定（见 SKILL.md「PoC 规范」）：
   - 彩色输出（非 tty / 设置了 NO_COLOR 时自动降级）
-  - 六阶段与报告「验证情况」一一对应
+  - 阶段可合并、不强凑六段（如 1+2 合并、3+4 内联进 Impact）；报告「验证情况」仍覆盖六阶段内容
   - 验证一律用系统级证据（标记文件 + owner uid / strace），不依赖接口返回值
+  - **基线必须非交互且与 Impact 同族**（禁用 `systemctl reboot` 等会弹认证/密码的对照命令）
+  - **Impact 覆盖尽可能多的可达危险方法**；破坏性方法标"可达但不执行（系统稳定性）"
   - 幂等自拉起前置进程；finally 自清理（还原配置/DB、删标记）
   - 若把载荷**编码进文件名**（如 SQL 注入用 SQLite `char()` 拼接、避开 '/'），注意 Linux 文件名
     成分上限 **255 字节**——超长会 `OSError: File name too long`，需缩短载荷或标记路径
@@ -176,11 +178,16 @@ def main() -> int:
         info("  连不上若是 ECONNREFUSED = 没有监听者（按需服务可能已空闲自停），属环境问题；")
         info("  它不是'被拒绝'——须重查 systemctl --user is-active / ss -xlnp 后再下结论")
 
-    # ---- 阶段 4 Boundary：权限边界 ----
-    step(4, "Boundary 权限边界")
+    # ---- 阶段 4 Boundary：权限边界（非交互基线） ----
+    step(4, "Boundary 权限边界（非交互基线）")
     uid = sh(["grep", "-E", "^Uid", "/proc/self/status"]).stdout.strip().replace("\n", " | ")
     info(uid or "Uid: ?")
-    info("TODO：记录目标进程 uid / 能力位 / 权限位（对照步骤 0 基线，判断是否越权）")
+    info("TODO：记录目标进程 uid / 能力位 / 权限位（对照基线，判断是否越权）")
+    info("基线禁用会弹认证的命令（如 systemctl reboot）；用非交互对照：")
+    info("  pkcheck --action-id <action> --process $$        # rc=2 = 本应拦截")
+    info('  busctl call org.freedesktop.login1 /org/freedesktop/login1 '
+         'org.freedesktop.login1.Manager CanReboot   # s "challenge" = 需认证')
+    info("  自建文件属主对照：自建文件 st_uid == 自身 uid，而 Impact 同族操作产物应为 0")
     if P2P_ADDR:
         info("4b 对端 uid 校验（P2P 唯一可能的门禁）：")
         info("   静态 objdump -T <bin> | grep -E 'g_credentials_get_unix_user|sd_bus_creds_get_euid'")
@@ -189,17 +196,20 @@ def main() -> int:
         info("        成功且方法可调 = 跨用户越权成立（CWE-862）")
         info("        Permission denied = 被传输层挡住（文件系统 socket / 0700 目录）→ 边界成立")
 
-    # ---- 阶段 5 Impact：边界突破（系统级验证，不依赖返回值） ----
+    # ---- 阶段 5 Impact：边界突破（覆盖尽可能多的可达危险方法） ----
     step(5, "Impact 边界突破")
-    info("TODO：触发汇点。示例手段：")
-    info(f"  - 标记文件：写 {MARKER}，核对 owner uid")
-    info("  - strace -f -e trace=execve -p <pid>  观察是否真的出现 sh -c / rm / touch")
+    info("TODO：批量触发，不要只证一个方法/一个注入点：")
+    info(f"  - 注入类：对每个字符串参数打一轮载荷（`;cmd;#` / 引号逃逸 / `$( )` / 反引号），")
+    info(f"    每点用独立 marker（如 {MARKER}_<tag>），核对 owner uid == 服务运行身份")
+    info("  - 特权类：批量调用多个危险方法，逐个取系统级证据（文件/进程/状态）")
+    info("  - 破坏性方法（reboot/restore/rm -rf）标『可达但不执行（系统稳定性）』并附其 root 命令")
+    info("  - strace -f -e trace=execve -p <pid>  观测是否真的出现 sh -c / rm / touch")
     for f in (MARKER,):
         try:
             os.remove(f)
         except OSError:
             pass
-    # TODO: 在这里调用入口触发漏洞（busctl / subprocess ...）
+    # TODO: 在这里批量调用入口触发漏洞（busctl / subprocess ...）
     time.sleep(2)
     marker_found = os.path.exists(MARKER)
     if marker_found:
