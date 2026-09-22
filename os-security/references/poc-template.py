@@ -19,6 +19,9 @@ Python PoC 骨架 —— os-security skill
   - 幂等自拉起前置进程；finally 自清理（还原配置/DB、删标记）
   - 若把载荷**编码进文件名**（如 SQL 注入用 SQLite `char()` 拼接、避开 '/'），注意 Linux 文件名
     成分上限 **255 字节**——超长会 `OSError: File name too long`，需缩短载荷或标记路径
+  - **点对点 / 抽象套接字 D-Bus**（服务不挂总线）：填 P2P_ADDR，且**不要**设 DBUS_SESSION_BUS_ADDRESS；
+    跨用户验证用 `sudo -u nobody python3 <本脚本>`。注意 **"方法可跨用户调用" ≠ "敏感数据可读 / 状态被改变"**
+    ——机密性/完整性影响必须用实际返回值或副作用证明（返回空 `[]`、`issuccessful:false` 都不算已证实）
 """
 
 import os
@@ -69,6 +72,13 @@ BUS_SERVICE = "org.example.Service"          # 会话总线服务名；无则留
 CONF_PATH = os.path.expanduser("~/.config/example/app.ini")  # 需备份/还原的配置
 MARKER = "/tmp/poc-marker"                   # 系统级验证标记（换成你的）
 
+# —— 点对点 / 直连 D-Bus 专用（P2P 不挂总线，与总线路径二选一；用哪个填哪个）——
+P2P_ADDR = ""                                # 如 "unix:abstract=/tmp/.example-<uid>.sock"；留空 = 走总线
+P2P_OBJPATH = "/com/example/Object"          # 对象路径
+P2P_IFACE = "com.example.Interface"          # 接口
+P2P_METHOD = "getSomething"                  # 探测方法（优先选只读方法）
+P2P_OTHER_USER = "nobody"                    # 跨用户测试身份
+
 VERDICT_EXISTS = "漏洞存在"
 VERDICT_ABSENT = "漏洞不存在"
 VERDICT_ERROR = "poc 执行失败，请调整环境或改用其他方式验证"
@@ -98,12 +108,13 @@ def ensure_process() -> bool:
     if not env.get("WAYLAND_DISPLAY") and os.path.exists(f"{env['XDG_RUNTIME_DIR']}/wayland-0"):
         env["WAYLAND_DISPLAY"] = "wayland-0"
     env.setdefault("DISPLAY", ":0")
-    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={env['XDG_RUNTIME_DIR']}/bus")
+    if not P2P_ADDR:                          # 仅总线路径需要会话总线地址；P2P 不挂总线
+        env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={env['XDG_RUNTIME_DIR']}/bus")
     info(f"拉起目标：{' '.join(LAUNCH_CMD)}")
     subprocess.Popen(LAUNCH_CMD, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      stdin=subprocess.DEVNULL, env=env, start_new_session=True)
     _started = True
-    if not BUS_SERVICE:                       # 无总线服务：只等进程
+    if P2P_ADDR or not BUS_SERVICE:           # P2P 无总线服务名可等（它不挂总线）：只等进程
         time.sleep(5)
         return process_alive()
     for _ in range(40):                       # 等总线服务注册（最多 40s）
@@ -160,12 +171,23 @@ def main() -> int:
         bad("目标未能就绪（进程未起来 / 总线服务未注册）")
         return 2
     info("TODO：以普通用户身份触发入口（busctl / 二进制参数），确认可达")
+    if P2P_ADDR:
+        info("P2P 服务：用 Gio.DBusConnection.new_for_address_sync(P2P_ADDR) 连接——不要用 busctl")
+        info("  连不上若是 ECONNREFUSED = 没有监听者（按需服务可能已空闲自停），属环境问题；")
+        info("  它不是'被拒绝'——须重查 systemctl --user is-active / ss -xlnp 后再下结论")
 
     # ---- 阶段 4 Boundary：权限边界 ----
     step(4, "Boundary 权限边界")
     uid = sh(["grep", "-E", "^Uid", "/proc/self/status"]).stdout.strip().replace("\n", " | ")
     info(uid or "Uid: ?")
     info("TODO：记录目标进程 uid / 能力位 / 权限位（对照步骤 0 基线，判断是否越权）")
+    if P2P_ADDR:
+        info("4b 对端 uid 校验（P2P 唯一可能的门禁）：")
+        info("   静态 objdump -T <bin> | grep -E 'g_credentials_get_unix_user|sd_bus_creds_get_euid'")
+        info("        —— 未导入 = 不具备校验能力；日志出现 peer credentials ≠ 做了校验")
+        info(f"   动态 换 uid 连接：sudo -u {P2P_OTHER_USER} python3 <本脚本>")
+        info("        成功且方法可调 = 跨用户越权成立（CWE-862）")
+        info("        Permission denied = 被传输层挡住（文件系统 socket / 0700 目录）→ 边界成立")
 
     # ---- 阶段 5 Impact：边界突破（系统级验证，不依赖返回值） ----
     step(5, "Impact 边界突破")

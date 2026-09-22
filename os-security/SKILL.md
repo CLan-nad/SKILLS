@@ -1,6 +1,6 @@
 ---
 name: os-security
-description: "Linux 系统黑盒漏洞挖掘：分析 SUID 文件、文件能力（Capabilities）、D-Bus 接口授权、PolicyKit 策略配置，评估风险并尝试未授权利用，生成 POC 和漏洞报告。Use when: (1) 用户需要对 Linux 系统进行黑盒安全评估和漏洞挖掘，(2) 用户提供了 SUID/文件能力/D-Bus/PolicyKit 扫描结果需要分析，(3) 用户需要生成授权不当类漏洞的 POC 和报告，(4) 需要对 Linux 系统进行本地提权/未授权访问测试，(5) 需要审计 Kylin/银河麒麟/openKylin 系统的安全配置。"
+description: "Linux 系统黑盒漏洞挖掘：分析 SUID 文件、文件能力（Capabilities）、D-Bus 接口授权（含点对点 / 抽象套接字跨用户越权）、PolicyKit 策略配置，评估风险并尝试未授权利用，生成 POC 和漏洞报告。Use when: (1) 用户需要对 Linux 系统进行黑盒安全评估和漏洞挖掘，(2) 用户提供了 SUID/文件能力/D-Bus/抽象套接字/PolicyKit 扫描结果需要分析，(3) 用户需要生成授权不当类漏洞的 POC 和报告，(4) 需要对 Linux 系统进行本地提权/未授权访问测试，(5) 需要审计 Kylin/银河麒麟/openKylin 系统的安全配置。"
 ---
 
 # OS Security — 操作系统黑盒漏洞挖掘
@@ -15,7 +15,7 @@ Agent 安装在目标系统上，所有命令通过 Bash 在目标系统本地�
 
 ```bash
 id && whoami && uname -a                          # 确认为普通用户，确认系统版本
-which strings file getcap busctl pkaction nm readelf strace 2>/dev/null  # 确认工具可用
+which strings file getcap busctl pkaction nm readelf strace ss 2>/dev/null  # 确认工具可用
 ```
 
 **规则**：禁止在用户工作目录下创建临时文件。临时文件一律用 `$TEMP` 或 `/tmp`，使用后清理。
@@ -175,12 +175,12 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
 | 攻击面 | 有意义的条件 | 不满足则 |
 |--------|------------|---------|
 | SUID/Cap | `find`/`getcap` 有输出 | 跳过 |
-| D-Bus | 有 D-Bus 策略文件或用户指定了服务 | 跳过 |
+| D-Bus | 有 D-Bus 策略文件、或用户指定了服务、**或组件有自己的私有 socket（抽象 / 文件系统）** | 跳过 |
 | PolicyKit | 有 policy 文件或用户指定了 action | 跳过 |
 | 系统状态 diff | 有 `.service`/`.ko` 且可启动，**或为图形会话应用（可运行）** | 跳过 |
 | 会话总线 | 组件可运行（GUI/桌面应用常见） | 跳过 |
 | 非特权目标 | 权限摸底显示全部攻击面均在登录用户权限域内 | 触发扩展模式门控（见「可选扩展模式」） |
-| sudo/cron/Unix socket | 对应命令有输出 | 跳过 |
+| sudo/cron/Unix socket | 对应命令有输出（**抽象套接字用 `ss -xlnp` 查，`find -type s` 看不到**）| 跳过 |
 
 ### 模式 A：组件驱动
 
@@ -218,15 +218,16 @@ objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定�
 
 | 步骤 | 内容 |
 |------|------|
-| C0 | 权限基线（XML Policy + PolicyKit action + 会话总线默认策略）|
-| C1 | `busctl tree` + `busctl introspect` + `busctl status`（服务级 + 会话级）|
+| C0 | 权限基线 + **拓扑判定**（XML Policy + PolicyKit action + 会话总线默认策略；先判 system / session / **P2P**）|
+| C1 | `busctl tree` + `busctl introspect` + `busctl status`（服务级 + 会话级）；**`busctl` 找不到时用 `ss -xlnp` 找 P2P / 抽象套接字**（不在总线上者对 busctl 完全不可见）|
+| C1.5 | **对端 uid 校验检查**（P2P 专项：`g_credentials_get_unix_user` / `sd_bus_creds_get_euid` 等符号是否导入）+ **跨用户连接实测**（见 dbus-authz.md「第三种拓扑」）|
 | C2 | 关键词定级（P0-P3，详见 dbus-authz.md）|
 | C2.5 | 入口↔汇点可达性回溯（sink → 入口，见「可达性回溯：疑似 sink → 攻击者入口」）|
-| C3 | 普通用户调用（系统总线 `--system` / 会话总线 `--user`）|
+| C3 | 普通用户调用（系统总线 `--system` / 会话总线 `--user`；**P2P 用 `new_for_address_sync`，跨用户加 `sudo -u nobody`**）|
 | C4 | 系统级命令验证 |
 | C5 | 确认漏洞后，Python 深入利用（详见 deep-exploitation.md）|
 
-> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。注意 `QWidget.close()` 会落到 `closeEvent` 等事件入口，而 `closeEvent` 可能再 emit 信号触发清理/删除槽——必须把方法入口一路追到 sink（见「可达性回溯」）。
+> **枚举必须完整**：`busctl tree <服务>` 列出全部对象路径，逐路径 `introspect`。**根路径只返回 Introspectable/Peer ≠ 无攻击面**——接口常挂在子对象路径下。GUI/桌面组件优先用 `busctl --user` 枚举会话总线（Qt 应用还会自动导出 `org.qtproject.Qt.QWidget` 等接口，见 dbus-authz.md）。注意 `QWidget.close()` 会落到 `closeEvent` 等事件入口，而 `closeEvent` 可能再 emit 信号触发清理/删除槽——必须把方法入口一路追到 sink（见「可达性回溯」）。**另注意 D-Bus 有三种拓扑**：system / session / **点对点（P2P，无 daemon）**。P2P 服务 `busctl` 完全看不到，且 daemon 侧管控（XML Policy / limitCtl / polkit）一律缺席——那里跨用户**可测**，见 dbus-authz.md「第三种拓扑」。
 
 ### 模式 D：PolicyKit 驱动
 
@@ -307,6 +308,9 @@ busctl introspect <服务> <路径>
 
 # 步骤2：普通用户调用（系统总线 `--system`；会话总线服务改用 `busctl --user call`）
 busctl --system call <服务> <路径> <接口> <方法> <参数>
+#   P2P/直连服务不挂总线 → busctl 不可用，改用：
+#   Gio.DBusConnection.new_for_address_sync('unix:abstract=<名>', ...) + conn.call_sync(...)
+#   跨用户测试：把整段连接+调用脚本用 `sudo -u nobody python3` 再跑一次
 
 # 步骤3：系统级验证 + 恢复
 <系统级验证命令>
@@ -389,7 +393,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 | [references/component-discovery.md](references/component-discovery.md) | 组件信息收集、通信机制速查、系统状态对比、配置/sudo/cron/Unix socket 审计 |
 | [references/suid-analysis.md](references/suid-analysis.md) | SUID 五步判定、二进制逆向（checksec/nm/strace）、GTFOBins、PATH 劫持 |
 | [references/cap-analysis.md](references/cap-analysis.md) | 能力组合风险矩阵、进程内代码执行注入（LD_PRELOAD / Qt 插件目录劫持） |
-| [references/dbus-authz.md](references/dbus-authz.md) | D-Bus 方法关键词映射（P0-P3）、决策树、参数注入探测、白名单管控识别、验证命令 |
+| [references/dbus-authz.md](references/dbus-authz.md) | D-Bus 方法关键词映射（P0-P3）、决策树、参数注入探测、白名单管控识别、验证命令、**第三种拓扑（P2P / 抽象套接字）跨用户越权** |
 | [references/polkit-authz.md](references/polkit-authz.md) | PolicyKit allow_active 审计、pkexec 用法 |
 | [references/deep-exploitation.md](references/deep-exploitation.md) | D-Bus 深入利用：白名单管控绕过四法（LD_PRELOAD 首选/bwrap/PYTHONPATH/ptrace）、任意文件写利用链、提权链 Python 模板、符号链接绕过 |
 | [references/report-template.md](references/report-template.md) | 漏洞报告模板、CVSS 3.1 严格评分指南、危害判定对照表 |
@@ -411,6 +415,9 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 - [ ] **探测优先顺序已遵守**（接口枚举先于静态逆向；静态仅在探测无果时使用）
 - [ ] **会话总线已 diff**（组件启动前后 `busctl --user list` 对比）
 - [ ] **接口全量枚举**（`busctl tree` 的全部对象路径均已 `introspect`，无"根路径空即放弃"）
+- [ ] **D-Bus 拓扑已判定**（system / session / P2P）；`busctl` 找不到时已用 `ss -xlnp` 补查抽象 / P2P 套接字
+- [ ] **P2P 跨用户已实测**（换 uid 连接）；`ECONNREFUSED` 已排除为"无监听者"，未记为安全结论
+- [ ] **"方法可调用"与"影响已证实"已分开取证**（返回空 / 操作失败不计为影响已证实）
 - [ ] **无未验证假设终止探测**（"不可达/非漏洞"结论有系统级证据）
 - [ ] test-log.md 已记录关键步骤
 - [ ] **疑似 sink 已做可达性回溯**（六类引用形式逐一查，尤其取地址/信号槽/D-Bus 导出）；"不可达"结论附否定证据 + 一条黑盒证据
@@ -437,6 +444,7 @@ D-Bus 深入利用（确认漏洞后）详见 [references/deep-exploitation.md](
 **模式 C/D**：
 - [ ] P0/P1 方法已标记并测试，陌生术语已查背景
 - [ ] 全对象路径 × 接口 × 方法签名已枚举（含会话总线与 Qt 自动导出接口）
+- [ ] **P2P / 抽象套接字已纳入**：`busctl` 未命中时用 `ss -xlnp` 补查；已检查对端 uid 校验符号（`g_credentials_get_unix_user` / `sd_bus_creds_get_euid`）并做跨用户连接实测
 - [ ] 参数逐字段 fuzz 已执行（数组/结构体元素、注入载荷）
 - [ ] 二阶/配置门控触发路径已评估（持久化载荷 + 重载 + 门控开关）
 - [ ] D-Bus 白名单管控：先确认受控（.limit/yaml + 报错分层）才评估绕过，LD_PRELOAD 优先，RootOnly 类直接放弃

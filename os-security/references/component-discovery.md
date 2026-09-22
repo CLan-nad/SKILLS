@@ -11,7 +11,7 @@ Linux 组件通过以下机制暴露攻击面，按组件类型匹配：
 | D-Bus | 守护进程 (.service) | `busctl --system list`（系统总线）/ `busctl --user list`（会话总线）| 方法枚举 → 策略审计 → 未授权调用；**逐对象路径枚举**（根路径空 ≠ 安全）|
 | Netlink | 内核模块 (.ko) | `cat /proc/net/netlink` | 协议号 → Python socket 交互 |
 | 系统调用 | SUID/Cap 二进制 | `strings`/`strace` | 危险函数 → 参数注入 → 权限绕过 |
-| Unix Socket | 守护进程 | `ss -xlpn` | 权限检查 → 连接测试 |
+| Unix Socket | 守护进程 | `ss -xlnp`（**`@` 打头 = 抽象套接字；`find -type s` 看不到**）| 文件系统 → 权限检查；**抽象 → 对端 uid 校验 + 跨用户连接**；**P2P D-Bus 服务 `busctl` 完全看不到** |
 | loopback TCP/UDP | 守护进程 | `ss -tlnp \| grep 127` | 端口连接 → 认证测试 |
 | securityfs | 内核模块 | `ls /sys/kernel/security/` | 读写权限测试 |
 | 配置文件 | 所有类型 | 文件清单过滤 | 权限检查 → 注入点分析 |
@@ -88,7 +88,7 @@ echo "$FILE_LIST" | grep '\.ko$'
 | 类型 | 文件特征 | 攻击面优先级 | 说明 |
 |------|---------|-------------|------|
 | 内核模块 | `.ko` 文件 | netlink、securityfs、module params、ioctl | 需 `insmod` 后测试 |
-| 守护进程 | 二进制 + `.service` | D-Bus、监听端口、配置文件、SUID/Cap | 需 `systemctl start` 后测试 |
+| 守护进程 | 二进制 + `.service` | D-Bus、**私有 socket（抽象 / 文件系统）**、监听端口、配置文件、SUID/Cap | 需 `systemctl start` 后测试 |
 | 用户态工具 | 二进制（无 service） | SUID/Cap、命令行参数注入 | 可直接执行测试 |
 | 配置文件 | `.conf`/`.policy`/`.xml` | 文件权限、内容注入点 | 几乎无独立攻击面，配合守护进程测试 |
 | 库文件 | `.so` | 导出符号、LD_PRELOAD | 攻击面较小，配合调用方测试 |
@@ -218,16 +218,45 @@ grep -R '\*' /etc/crontab /etc/cron.d/ 2>/dev/null
 ### Unix Socket 审计
 
 ```bash
-# 列出所有 Unix Domain Socket
-ss -xlpn 2>/dev/null
+# 列出所有 Unix Domain Socket（-x 会同时列出抽象套接字，以 @ 打头）
+ss -xlnp 2>/dev/null
 
-# 检查 socket 文件权限（普通用户可写/可连接的 socket）
+# 抽象套接字单独筛出来（find -type s / ls -la 永远看不到它们）
+ss -xlnp 2>/dev/null | grep '@'
+
+# 文件系统套接字：检查权限（普通用户可写/可连接的 socket）
 find /run /var/run /tmp -type s -ls 2>/dev/null
 
-# 尝试连接可疑 socket
+# 尝试连接可疑 socket（文件系统套接字）
 nc -U <socket_path> 2>&1
 # 普通用户能连接且无认证 → 可能未授权访问
 ```
+
+**两类套接字的权限模型完全不同，必须分开处理：**
+
+| 类型 | `ss` 中的样子 | 权限 | 测试方向 |
+|------|-------------|------|---------|
+| 文件系统 | `/run/.../x.sock`（真路径） | 有 mode/owner；`connect()` 需穿过父目录 + 对文件有写权限 | 查父目录 + 文件权限，看普通用户能否连 |
+| **抽象** | **`@/tmp/...x.sock`** | **无文件系统节点 → 无 mode/owner → 内核跳过权限检查 → 任何本地 uid 都能连** | **只能靠服务端校验对端 uid**（见下） |
+
+**抽象套接字要点**：
+
+- 名字活在**内核抽象命名空间**，`bind()` **不创建文件**。名字**可以含 `/`**，所以长得像路径——但 `ls` / `find -type s` 都找不到它。
+- 因此**没有任何文件权限可查**（"检查 socket 文件权限"对抽象套接字无意义）。
+- 唯一可能的门禁 = 服务端自己校验**对端凭证**（`SO_PEERCRED`：内核在建立连接时给出的 pid/uid/gid，不可伪造）。
+- **隔离的正确做法**（对照学习）：文件系统套接字 + per-uid `0700` 目录。会话总线就是这么隔离的——`/run/user/<uid>` 是 `drwx------`，因此别的用户连它的 `/run/user/<uid>/bus` 只会得到 `Permission denied`。
+- **点对点（P2P）D-Bus 服务**用 `GDBusServer` 直接 `bind()` 一个套接字（常见为抽象），**不挂任何总线 → `busctl` 完全看不到它**。发现、判定与跨用户测试见 [dbus-authz.md](dbus-authz.md)「第三种拓扑：点对点（P2P）/ 直连 D-Bus（无 daemon）」。
+
+**跨用户连接测试**（抽象套接字）：换一个 uid 去连，看是否成功。
+
+```bash
+# 本用户基线（Python 字符串里的 \0 前缀 = 抽象套接字）
+python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('\0<抽象套接字名>');print('CONNECTED')"
+# 换用户：成功 = 该套接字对全体本地用户开放（跨用户可达）
+sudo -u nobody python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.connect('\0<抽象套接字名>');print('CONNECTED')"
+```
+
+> **`ECONNREFUSED` 不等于"被拒绝"**：抽象套接字报 `Connection refused` 表示**没有监听者**（按需服务可能已空闲自停），**不得记为安全结论**；真正的"被拒绝"是 `Permission denied`（EACCES）。
 
 ### loopback 网络服务审计
 
@@ -255,7 +284,7 @@ cat /proc/net/netlink > /tmp/before_netlink
 ls /sys/kernel/security/ > /tmp/before_secfs
 busctl --system list > /tmp/before_dbus
 busctl --user list > /tmp/before_user_dbus      # 会话总线（GUI/桌面组件必做）
-ss -elnp > /tmp/before_sockets
+ss -tulxnep > /tmp/before_sockets             # -x = unix（抽象套接字以 @ 打头）；-l = 监听
 # 组件私有数据目录（日志/xml/清单常在此产生，且易被设为全局可读）
 find /var/lib/<组件名> /var/log /data /run -maxdepth 3 \( -path '*<组件名>*' -o -name '*<组件名>*' \) -printf '%M %u:%g %p\n' 2>/dev/null > /tmp/before_datadir
 
@@ -271,7 +300,7 @@ diff /tmp/before_netlink <(cat /proc/net/netlink)
 diff /tmp/before_secfs <(ls /sys/kernel/security/)
 diff /tmp/before_dbus <(busctl --system list)
 diff /tmp/before_user_dbus <(busctl --user list)
-diff /tmp/before_sockets <(ss -elnp)
+diff /tmp/before_sockets <(ss -tulxnep)
 diff /tmp/before_datadir <(find /var/lib/<组件名> /var/log /data /run -maxdepth 3 \( -path '*<组件名>*' -o -name '*<组件名>*' \) -printf '%M %u:%g %p\n' 2>/dev/null)   # 新出现/权限变化的文件 → 按可读性查信息暴露
 
 # 4. 清理
@@ -286,7 +315,7 @@ rm /tmp/before_*
 | securityfs | `ls /sys/kernel/security/` | 内核模块在 securityfs 暴露了接口，读写可能影响安全策略 |
 | D-Bus | `busctl --system list` | 守护进程注册了新的 D-Bus 服务，枚举方法并测试授权 |
 | 会话总线 | `busctl --user list` | 组件注册了用户总线服务（GUI/桌面应用常见），**默认对同 UID 任意进程开放**；用 `tree` 枚举全部对象路径 |
-| 监听端口 | `ss -elnp` | 守护进程开启了监听 socket，检查是否为本地 only、是否有认证 |
+| 监听端口 / socket | `ss -tulxnep` | 守护进程开启了监听 socket，检查是否为本地 only、是否有认证；**新出现的 `@...` = 抽象套接字 → 无文件权限、全 uid 可连**，须查服务端有无对端 uid 校验（见「Unix Socket 审计」） |
 
 ### 对新出现的接口做后续测试
 
@@ -305,6 +334,7 @@ rm /tmp/before_*
 - **新 D-Bus 服务（系统总线）** → 进入 D-Bus 驱动模式（模式 C）；用 `busctl tree` 枚举**全部对象路径**，逐路径 `introspect`——根路径只返回 Introspectable/Peer **不等于**无攻击面
 - **新会话总线服务** → 同样进入模式 C，但用 `busctl --user` 系列命令；GUI/桌面组件常在此暴露控制接口，且 Qt 应用会自动导出 `org.qtproject.Qt.QWidget`（`close()`/`show()`/`hide()`）等免费接口
 - **新监听端口** → `curl`/`nc` 测试是否接受非本地连接
+- **新抽象套接字 / P2P socket** → 抽象套接字（`@` 打头）**无文件权限、全 uid 可连**：进 [dbus-authz.md](dbus-authz.md)「第三种拓扑：点对点（P2P）」判有无对端 uid 校验，并做**跨用户连接实测**；文件系统套接字则查父目录 + 文件权限
 
 ---
 

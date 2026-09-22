@@ -46,6 +46,8 @@ cat /usr/share/dbus-1/services/<服务名>.service
          SELinux/AppArmor (MAC 强制访问控制，最后防线)
 ```
 
+> **适用范围**：上述三层**仅对"在总线上"的服务成立**。组件可以完全不走总线（点对点 / 直连），此时 daemon 侧的策略、limitCtl、polkit **全部缺席**——见下方「第三种拓扑：点对点（P2P）/ 直连 D-Bus」。
+
 **关键攻击面**：polkit 是可选的。很多自研 D-Bus 服务未集成 polkit，意味着只要 XML Policy 允许，任何用户都能调用。快速检查：
 
 ```bash
@@ -79,9 +81,108 @@ busctl --user call <服务名> <对象路径> <接口> <方法> <参数>
 要点：
 
 - 会话总线服务**没有"未授权"概念**（同 UID 即可调用），判定重心从"能否调用"转为"调用后能造成什么"（参数注入、持久化污染、触发高权限分支）。
-- 会话总线做不到跨用户/提权，属**同权限域缺陷**——严格模式下不计入漏洞；如需产出，须先经 SKILL.md「可选扩展模式」取得用户确认。
+- 会话总线做不到跨用户/提权，属**同权限域缺陷**——严格模式下不计入漏洞；如需产出，须先经 SKILL.md「可选扩展模式」取得用户确认。**但该结论仅对"确实在总线上"的服务成立**：组件可能同时、或改为在抽象套接字上做点对点 D-Bus，那里跨用户**成立且可测**（见下方「第三种拓扑」）。
 - Qt 应用自动导出 `org.qtproject.Qt.QWidget` 等接口，可直接触发关闭/退出代码路径（见本文件「对象路径 × 接口 × 方法全量枚举」）。
 - 与 [component-discovery.md](component-discovery.md) A3 的会话总线 diff、[cap-analysis.md](cap-analysis.md) 的 Qt 插件目录劫持配合使用。
+
+---
+
+## 第三种拓扑：点对点（P2P）/ 直连 D-Bus（无 daemon）
+
+前面两节都假定服务**在总线上**。组件也可以完全不走总线：自己 `bind()` 一个套接字、用 `GDBusServer` 直接接受连接（点对点 / 直连）。此时 **XML Policy、limitCtl、polkit 全部缺席**——没有 daemon 去执行它们。
+
+### 拓扑判定（先定拓扑，再决定测什么）
+
+| 拓扑 | 谁能**连上** | 门禁在哪 | 发现命令 |
+|------|-------------|---------|---------|
+| 系统总线 | **所有人** | **daemon 的策略层**（`system.d/*.conf` + limitCtl + polkit） | `busctl --system list` |
+| 会话总线 | **只有属主**（`/run/user/<uid>` 是 `0700`） | **传输层**（文件系统权限） | `busctl --user list` |
+| **点对点 / 直连** | **所有人**（抽象套接字） | **只能靠服务自己校验对端 uid** | **`ss -xlnp`（`busctl` 看不到！）** |
+
+```bash
+# 1. busctl 找不到 ≠ 没有服务 —— 必须继续往下查
+busctl --system list | grep -i <关键字>
+busctl --user   list | grep -i <关键字>
+# 2. 找它自己的 socket（抽象套接字对 busctl 完全不可见）
+ss -xlnp 2>/dev/null | grep '@'                  # @ 打头 = 抽象套接字
+# 3. 判定绑定方式（二进制层）
+strings -a <二进制> | grep -E 'g_dbus_server_new_sync|GDBusServer'   # 命中 → P2P 服务端
+strings -a <二进制> | grep -E 'g_bus_get_sync|g_bus_own_name'        # 命中 → 走总线
+```
+
+### 抽象套接字（`unix:abstract=`）
+
+- 名字活在**内核抽象命名空间**，`bind()` **不创建文件** → 没有 inode / mode / owner → **内核跳过权限检查**。
+- 名字**可以包含 `/`**，因此长得像路径却根本不存在：`unix:abstract=/tmp/.<name>-<uid>.sock` 用 `ls` 是找不到的。
+- `ss -xlnp` 里以 **`@` 打头**即抽象；`find -type s`、`ls -la` **永远看不到它**。
+- 唯一可能的补救：服务端自己校验**对端凭证**。
+- 正确做法（对照）：**文件系统套接字 + per-uid `0700` 目录** —— 这正是会话总线隔离的本体，`connect()` 会因父目录不可穿越而报 `Permission denied`。
+
+### 判定：唯一门禁是「有无对端 uid 校验」
+
+点对点服务**拿得到**对端身份（内核在连接建立时提供 `SO_PEERCRED`：pid/uid/gid，不可伪造），问题只在于它**查不查**：
+
+| 绑定 | 校验符号（**导入 = 有能力校验；未导入 = 不具备校验能力**）|
+|------|--------------------------------------------------------|
+| GLib | `g_credentials_get_unix_user`（`g_dbus_connection_get_peer_credentials` 只"取"，不"判"）|
+| sd-bus | `sd_bus_creds_get_euid` / `sd_bus_query_sender_privilege` / `sd_bus_query_sender_creds` |
+| 裸 socket | `getsockopt(SO_PEERCRED)` |
+
+```bash
+# 静态：判断它有没有能力校验
+objdump -T <二进制> | grep UND | awk '{print $NF}' | grep -E 'credentials|creds_get|SO_PEERCRED'
+strings -a <二进制> | grep -E 'g_credentials_get_unix_user|sd_bus_creds_get_euid'
+```
+
+> **反模式**：日志里出现 peer credentials（如 `Client connected. Peer credentials: ...uid=65534`）**不等于**做了校验——"拿到只打印"是这类服务的常见形态，必须回到符号层确认是否真的存在 uid 比对。
+
+### 测试：跨用户连接
+
+```bash
+# 步骤 0：服务运行身份（决定边界性质）
+ps -o uid,user,pid,cmd -C <进程名>
+#   以 uid N 的 user 服务运行 → 边界是「用户 ↔ 用户」，不是 → root
+
+# 步骤 1：确认监听在抽象套接字
+ss -xlnp 2>/dev/null | grep '<socket 关键字>'
+
+# 步骤 2：本用户连接（基线，应成功）
+#   注意：P2P 不走总线，不能用 busctl，只能用 new_for_address_sync
+python3 - <<'EOF'
+import gi; gi.require_version('Gio', '2.0')
+from gi.repository import Gio, GLib
+c = Gio.DBusConnection.new_for_address_sync(
+        'unix:abstract=<套接字名>',
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT, None, None)
+r = c.call_sync(None, '<对象路径>', '<接口>', '<方法>',
+                GLib.Variant('(s)', ('',)), None, Gio.DBusCallFlags.NONE, 5000, None)
+print(r.unpack())
+EOF
+
+# 步骤 3：换用户连接（跨用户测试）
+sudo -u nobody python3 <同上脚本>
+#   成功 → 服务日志会出现对端 uid（如 uid=65534）→ 跨用户边界突破
+```
+
+**判定**：
+
+| 换用户连接的结果 | 含义 |
+|-----------------|------|
+| **成功且方法可调** | **跨用户未授权访问成立**（CWE-862） |
+| `Permission denied`（EACCES） | 被传输层挡住（文件系统套接字 / `0700` 目录）→ 边界成立 |
+| **`Connection refused`（ECONNREFUSED）** | **没有监听者，不是"被拒绝"** → 必须重查服务状态，**不得记为安全结论** |
+
+### 三个陷阱
+
+1. **`ECONNREFUSED` ≠ 拒绝**：抽象套接字的 `ECONNREFUSED` 只表示**无监听者**。按需 / D-Bus-activated 的 user 服务常在客户端断开后自停（journal 里 `service timer expired` → `stopping service`），于是**紧接的第二个探测就会撞上它**。
+   → 探测顺序敏感：**跨用户探测排在第一个**；每步前后重查 `systemctl --user is-active <服务>` + `ss -xlnp`。
+2. **"方法可调用" ≠ "影响已证实"**：两件事必须**分开取证**。可调用 = 授权缺陷成立；**机密性/完整性影响必须用实际返回值或副作用证明**——查询返回空 `[]`、写/删操作返回 `issuccessful:false`，都**不能**算影响已证实。
+3. **定级不按理论最大**：user 服务跨用户 = **跨权限域（可越权）**，`S:C` 成立；`C`/`I` 按**实际取到的数据 / 真正改变的状态**定。可调用但无数据、无副作用 → 取低档。
+
+### 修复方向（写报告用）
+
+- 改用**文件系统套接字 + per-uid `0700` 目录**（照会话总线的隔离模型，让传输层挡人）；或
+- 在 `onNewConnection` 里取得对端 uid 并与自身 uid 比对，不一致即断开（`g_credentials_get_unix_user(creds, NULL) != getuid()`）。
 
 ---
 
