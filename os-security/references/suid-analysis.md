@@ -9,7 +9,7 @@
 ```
 0. 权限边界：普通用户默认能做什么？  → 基线建立（必须先做，非交互）
 1. 功能识别：这个 SUID/cap 能做什么？ → 功能分析
-1.5 参数首扫：argv 字符串参数打一轮注入载荷 → 先于 checksec/nm/strings（静态 ≤3 命令）
+1.5 参数首扫：argv 字符串参数打一轮注入载荷 → 先于 checksec/nm/strings（静态只定位）
 2. 可达性：普通用户能调用吗？        → 调用测试
 3. 影响验证：操作真的生效了吗？      → 系统级验证（marker + owner uid）
 4. 权限对比：是否绕过了应有权限？    → 对比基线
@@ -28,7 +28,7 @@ pkcheck --action-id <action> --process $$   # rc=2 = 本应认证（非交互基
 ```
 
 基线结论：`[默认需要 root]` → 继续；`[默认允许普通用户]` → 停止，判定为非漏洞。
-（`modify.own` 允许 / `modify.system` 需 auth_admin = 正常设计，不是漏洞。）
+（默认动作的正常配置；判定口径见 SKILL.md「Polkit 专项」——自定义 action 默认放行且落到特权操作仍是漏洞。）
 
 ---
 
@@ -45,7 +45,7 @@ ls -la /tmp/inj_<tag>   # marker 出现且 owner_uid=0 → root 命令注入
 ```
 
 载荷未生效且非"参数被拒"时，按消费端引号形态换形（`'` 逃逸 / `$( )` / 反引号 / `${IFS}` / 换行）；**判"无注入"须满足证据标准**（载荷到达执行点：strace 见 execve / 构造命令见于日志）。
-**此步先于 1.3-1.7 的 strings/checksec/nm 静态分析（静态 ≤3 命令，禁全面反汇编/函数边界/变量追踪；先枚举输入形状）。**
+**此步先于 1.3-1.7 的 strings/checksec/nm 静态分析（静态只定位，不做全面反汇编/函数边界/变量追踪；先枚举输入形状）。**
 
 ### 1.1 发现目标
 
@@ -175,3 +175,37 @@ export PATH=/tmp:$PATH
 
 - PolicyKit 策略审计 → 模式 D：[polkit-authz.md](polkit-authz.md)
 - 能力组合风险矩阵、进程内代码执行注入（LD_PRELOAD / Qt 插件目录劫持）、已知能力目标速查 → [cap-analysis.md](cap-analysis.md)
+
+---
+
+## 可达性回溯：疑似 sink → 攻击者入口
+
+> **仅 SKILL.md「主流程」4.5 情形 (b)（疑似高危接口利用失败）启用本节**；情形 (a) 只做轻量根因定位，不得展开。
+
+逆向发现疑似危险汇点（`system`/`popen`/`exec*`/写文件/`unlink`…）后，**必须回溯它如何被进入**。只 grep 直接调用会漏判——信号/槽、回调、`std::function`、vtable 取的是**函数地址**，不是 `call`。
+
+**反模式（禁止）**：`grep 'call.*<sink>'` 只找到一处 → 据此判定"不可达 / 仅 GUI 可达"。
+
+**六类引用形式（仅在"疑似高危汇点且利用失败"时逐一回溯）**：
+
+| # | 形式 | 命令 |
+|---|------|------|
+| a | 直接调用 | `grep -nE 'call.*<sym>' dis.txt` |
+| b | **取地址（最关键）** | `grep -nE '(lea\|mov\|push).*<sym>' dis.txt`；`readelf -rW <bin> \| grep <sym>`（`.data.rel.ro` 槽 = 指针表 / vtable / std::function） |
+| c | **Qt 信号/槽** | connect 站点 = 同一小段内同时出现"信号""槽"两个地址实参；`strings -a <bin> \| grep -E '^(1\|2)<name>\('`（moc 元对象 1signal/2slot）；旧式 `SIGNAL()/SLOT()`、`QMetaObject::invokeMethod` 同法 |
+| d | **D-Bus / Qt 自动导出** | `busctl --user tree/introspect`；`nm -C <bin> \| grep -E 'Adaptor\|registerObject\|closeEvent\|event\(\|timerEvent'`；`org.qtproject.Qt.QWidget.close()` → `QWidget::close` → `QCloseEvent` → `closeEvent()` |
+| e | 定时器/事件循环/队列 | `nm -C <bin> \| grep -E 'QTimer\|singleShot\|startTimer\|invokeMethod'`；`QueuedConnection` / `postEvent` |
+| f | 配置门控分支 | 见下方"门控溯源" |
+
+**回溯流程**：sink 符号 → 全形式引用 → 每条引用地址**回映射宿主函数**（`awk '/^[0-9a-f]+ <[^>]*>:/{fn=$0} /<ref_addr>/{print fn}' dis.txt`）→ 对宿主**递归**再问"谁进入它"（**递归=函数边界分析，仅 (b) 情形允许**）→ 终止于攻击者入口（D-Bus 方法 / Adaptor slot / 导出 event / main+argv / socket / 信号 emit），入口须**黑盒证实**。
+
+**门控溯源（键字符串 → 全局偏移 → 判定分支）**：
+
+```bash
+strings -t x <bin> | grep '<General/key>'                    # 键字符串 vaddr
+objdump -drwC -M intel <bin> | grep -nE 'lea.*# <vaddr>'      # 谁引用它（QSettings::value + toBool）
+# 赋值形态: lea key; call QSettings::value; call QVariant::toBool; mov %al,0x1a(%rbp) ← 0x1a 即偏移
+objdump -drwC -M intel <bin> | grep -nE '(cmp|test|movzbl).*0x1a\('   # 判定分支
+```
+
+**判定"不可达"的证据要求**：① 已排除**最相关的**引用形式（仅高危汇点场景才穷举六类，其余以**输入形状枚举**的否定证据替代）；② 至少一条黑盒证据（`strace` / 标记文件 / 状态变化）。
