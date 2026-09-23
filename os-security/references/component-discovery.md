@@ -10,7 +10,7 @@ Linux 组件通过以下机制暴露攻击面，按组件类型匹配：
 |---------|---------|---------|---------|
 | D-Bus | 守护进程 (.service) | `busctl --system list`（系统总线）/ `busctl --user list`（会话总线）| 按 SKILL.md「主流程」执行（定级→未授权调用）；**逐对象路径枚举**（根路径空 ≠ 安全）|
 | Netlink | 内核模块 (.ko) | `cat /proc/net/netlink` | 协议号 → Python socket 交互 |
-| 系统调用 | SUID/Cap 二进制 | `strings`/`strace` | 危险函数 → 参数注入 → 权限绕过 |
+| 系统调用 | SUID/Cap 二进制 | `strings`/`strace`（静态 ≤3 命令，输入形状枚举先行）| 危险函数 → 参数注入 → 权限绕过 |
 | Unix Socket | 守护进程 | `ss -xlnp`（**`@` 打头 = 抽象套接字；`find -type s` 看不到**）| 文件系统 → 权限检查；**抽象 → 对端 uid 校验 + 跨用户连接**；**P2P D-Bus 服务 `busctl` 完全看不到** |
 | loopback TCP/UDP | 守护进程 | `ss -tlnp \| grep 127` | 端口连接 → 认证测试 |
 | securityfs | 内核模块 | `ls /sys/kernel/security/` | 读写权限测试 |
@@ -182,7 +182,7 @@ getfacl <配置文件路径> 2>/dev/null
 # → 配置文件可写 → 注入攻击（修改配置导致服务执行恶意操作）
 ```
 
-> 本文件是从"入口→攻击面"枚举；若已知疑似 sink 需反查入口，见 SKILL.md「可达性回溯：疑似 sink → 攻击者入口」。
+> 本文件是从"入口→攻击面"枚举；若已知疑似 sink 需反查入口，见 SKILL.md「可达性回溯：疑似 sink → 攻击者入口」（≤3 命令；输入形状枚举先行）。
 
 ### sudo 权限检查
 
@@ -280,7 +280,7 @@ ls -la /usr/share/applications/<组件>*.desktop ~/.config/autostart/<组件>*.d
 #   MimeType 注册为默认处理器 + Exec=%u/%f → 恶意文件名/路径注入（配合"不可信文件名"链）
 grep -E '^(Exec|MimeType|TryExec)=' <组件>.desktop
 
-# 自启动注入验证：写非破坏标记 Exec= 到 ~/.config/autostart/<tag>.desktop
+# 自启动注入验证：写最小可观测危害载荷 Exec= 到 ~/.config/autostart/<tag>.desktop
 #   → 注销重登 / systemctl --user start <对应.target> → marker + owner uid 取证
 ```
 
@@ -425,7 +425,7 @@ grep -rl '<配置路径>' /etc/systemd /usr/share/dbus-1 2>/dev/null   # 谁的 
 
 ```bash
 cp <配置> /tmp/poc-conf.bak
-# 注入非破坏载荷：ExecStart=/bin/sh -c 'touch /tmp/inj_<tag>;#'（或对应字段）
+# 注入最小可观测危害载荷（写配置/加账户/杀进程均属应执行范围）：ExecStart=/bin/sh -c 'touch /tmp/inj_<tag>;#'（或对应字段）
 systemctl daemon-reload && systemctl restart <unit>   # 或等对应触发
 ls -la /tmp/inj_<tag>                                  # marker + owner uid 取证
 cp /tmp/poc-conf.bak <配置> && systemctl daemon-reload  # finally 还原
@@ -442,6 +442,6 @@ cat /sys/module/<模块名>/parameters/<参数>          # 当前值
 [ -w /sys/module/<模块名>/parameters/<参数> ] && echo "可写"
 
 # 危险信号：可写参数被驱动用于决定行为（如 debug 开关打开信息泄露、
-# 参数被拼进内核命令/固件路径）。写非破坏值验证后还原。
-echo <非破坏测试值> > /sys/module/<模块名>/parameters/<参数>
+# 参数被拼进内核命令/固件路径）。写入最小可观测危害值验证后还原。
+echo <最小可观测危害测试值> > /sys/module/<模块名>/parameters/<参数>
 ```

@@ -14,10 +14,10 @@ Python PoC 骨架 —— os-security skill
 
 约定（见 SKILL.md「PoC 规范」）：
   - 彩色输出（非 tty / 设置了 NO_COLOR 时自动降级）
-  - 阶段可合并、不强凑六段（如 1+2 合并、3+4 内联进 Impact）；报告「验证情况」仍覆盖六阶段内容
+  - **默认四阶段：1 Presence（存在+接口枚举）/ 2 Reachability（非交互基线+可达性）/ 3 Impact（危害）/ 4 Cleanup（清理）**；阶段可合并，但打印标签不得跳号（合并后顺次重编号）；报告「验证情况」覆盖四阶段
   - 验证一律用系统级证据（标记文件 + owner uid / strace），不依赖接口返回值
   - **基线必须非交互且与 Impact 同族**（禁用 `systemctl reboot` 等会弹认证/密码的对照命令）
-  - **Impact 覆盖尽可能多的可达危险方法**；破坏性方法标"可达但不执行（系统稳定性）"
+  - **Impact 覆盖尽可能多的可达危险方法**；仅四类不可逆系统级动作（reboot/shutdown、系统还原/回滚、格式化/擦除、不可逆数据销毁）标"可达但不执行"，其余（含进程级 DoS）必须实测取证；未授权读取/只读访问本身即危害
   - 幂等自拉起前置进程；finally 自清理（还原配置/DB、删标记）
   - 若把载荷**编码进文件名**（如 SQL 注入用 SQLite `char()` 拼接、避开 '/'），注意 Linux 文件名
     成分上限 **255 字节**——超长会 `OSError: File name too long`，需缩短载荷或标记路径
@@ -50,6 +50,7 @@ RESET = _c("\033[0m")
 
 
 def step(n: int, title: str) -> None:
+    # n 必须连续（合并阶段后顺次重编号，不得跳号）
     print(f"\n{CYAN}{BOLD}[阶段 {n}] {title}{RESET}")
 
 
@@ -154,8 +155,8 @@ def cleanup() -> None:
 
 
 def main() -> int:
-    # ---- 阶段 1 Presence：目标存在性 ----
-    step(1, "Presence 目标存在性")
+    # ---- 阶段 1 Presence：存在 + 接口枚举 ----
+    step(1, "Presence 存在 + 接口枚举")
     if not os.path.exists(TARGET_BIN):
         bad(f"主二进制不存在：{TARGET_BIN}")
         return 2
@@ -164,26 +165,17 @@ def main() -> int:
         got = sh(["md5sum", TARGET_BIN]).stdout.split()
         info(f"md5={got[0] if got else '?'}（预期 {BIN_MD5}）")
     backup_conf()
-
-    # ---- 阶段 2 Introspection：特性检查 ----
-    step(2, "Introspection 特性检查")
     info("TODO：枚举接口/方法/参数；随后**立刻以普通用户调用全部危险方法（未授权测试）**")
     info("     —— 字符串实参直接用注入载荷（调用即注入，见 dbus-authz.md）")
-    info("     —— 任何 objdump/nm/strings 之前先调用；静态仅当调用无果或需解释时才用")
+    info("     —— 任何 objdump/nm/strings 之前先调用；静态 ≤3 命令，禁全面反汇编")
 
-    # ---- 阶段 3 Reachability：可达性 ----
-    step(3, "Reachability 可达性")
+    # ---- 阶段 2 Reachability：非交互基线 + 可达性 ----
+    step(2, "Reachability 非交互基线 + 可达性")
     if not ensure_process():
         bad("目标未能就绪（进程未起来 / 总线服务未注册）")
         return 2
     info("TODO：以普通用户身份触发入口（busctl / 二进制参数），确认可达")
-    if P2P_ADDR:
-        info("P2P 服务：用 Gio.DBusConnection.new_for_address_sync(P2P_ADDR) 连接——不要用 busctl")
-        info("  连不上若是 ECONNREFUSED = 没有监听者（按需服务可能已空闲自停），属环境问题；")
-        info("  它不是'被拒绝'——须重查 systemctl --user is-active / ss -xlnp 后再下结论")
-
-    # ---- 阶段 4 Boundary：权限边界（非交互基线） ----
-    step(4, "Boundary 权限边界（非交互基线）")
+    info("     调不动 → 先枚举**输入形状**（文件 vs 目录 / 扩展名 / 内容 / 嵌套）再谈逆向")
     uid = sh(["grep", "-E", "^Uid", "/proc/self/status"]).stdout.strip().replace("\n", " | ")
     info(uid or "Uid: ?")
     info("TODO：记录目标进程 uid / 能力位 / 权限位（对照基线，判断是否越权）")
@@ -193,20 +185,21 @@ def main() -> int:
          'org.freedesktop.login1.Manager CanReboot   # s "challenge" = 需认证')
     info("  自建文件属主对照：自建文件 st_uid == 自身 uid，而 Impact 同族操作产物应为 0")
     if P2P_ADDR:
-        info("4b 对端 uid 校验（P2P 唯一可能的门禁）：")
+        info("对端 uid 校验（P2P 唯一可能的门禁）：")
         info("   静态 objdump -T <bin> | grep -E 'g_credentials_get_unix_user|sd_bus_creds_get_euid'")
         info("        —— 未导入 = 不具备校验能力；日志出现 peer credentials ≠ 做了校验")
         info(f"   动态 换 uid 连接：sudo -u {P2P_OTHER_USER} python3 <本脚本>")
         info("        成功且方法可调 = 跨用户越权成立（CWE-862）")
         info("        Permission denied = 被传输层挡住（文件系统 socket / 0700 目录）→ 边界成立")
 
-    # ---- 阶段 5 Impact：边界突破（覆盖尽可能多的可达危险方法） ----
-    step(5, "Impact 边界突破")
+    # ---- 阶段 3 Impact：危害（覆盖尽可能多的可达危险方法） ----
+    step(3, "Impact 危害")
     info("TODO：批量触发，不要只证一个方法/一个注入点：")
     info(f"  - 注入类：对每个字符串参数打一轮载荷（`;cmd;#` / 引号逃逸 / `$( )` / 反引号），")
     info(f"    每点用独立 marker（如 {MARKER}_<tag>），核对 owner uid == 服务运行身份")
     info("  - 特权类：批量调用多个危险方法，逐个取系统级证据（文件/进程/状态）")
-    info("  - 破坏性方法（reboot/restore/rm -rf）标『可达但不执行（系统稳定性）』并附其 root 命令")
+    info("  - 仅四类不可逆系统级动作（reboot/shutdown、还原/回滚、格式化/擦除、数据销毁）标『可达但不执行』；")
+    info("    其余（含进程级 DoS：kill/崩溃服务）必须实测取证；只读/空内容仍属危害")
     info("  - strace -f -e trace=execve -p <pid>  观测是否真的出现 sh -c / rm / touch")
     for f in (MARKER,):
         try:
@@ -222,8 +215,8 @@ def main() -> int:
     else:
         bad(f"标记 {MARKER} 未生成")
 
-    # ---- 阶段 6 Cleanup：清理验证 ----
-    step(6, "Cleanup 清理验证")
+    # ---- 阶段 4 Cleanup：清理 ----
+    step(4, "Cleanup 清理")
     cleanup()
     ok("已还原配置 / 删除标记")
     return 0 if marker_found else 1
@@ -265,7 +258,7 @@ finally:
 '''
 
 VARIANT_TEMPLATES["arbitrary_file_write"] = '''#!/usr/bin/env python3
-"""任意文件写（D-Bus/cap_dac_override/可写配置 通用）：PoC 默认写非破坏 cron 标记"""
+"""任意文件写（D-Bus/cap_dac_override/可写配置 通用）：PoC 默认写最小可观测危害（cron + marker/owner uid）"""
 import dbus, os
 
 SERVICE, OBJECT, IFACE = "<服务名>", "<对象路径>", "<接口名>"
