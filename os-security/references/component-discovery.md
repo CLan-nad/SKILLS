@@ -357,8 +357,8 @@ rm /tmp/before_*
   data = sock.recv(4096)  # 内核返回响应
   ```
 - **新 securityfs** → `cat`/`echo` 读写测试权限
-- **新 D-Bus 服务（系统总线）** → 进入 D-Bus 驱动模式（模式 C）；用 `busctl tree` 枚举**全部对象路径**，逐路径 `introspect`——根路径只返回 Introspectable/Peer **不等于**无攻击面
-- **新会话总线服务** → 同样进入模式 C，但用 `busctl --user` 系列命令；GUI/桌面组件常在此暴露控制接口，且 Qt 应用会自动导出 `org.qtproject.Qt.QWidget`（`close()`/`show()`/`hide()`）等免费接口
+- **新 D-Bus 服务（系统总线）** → 转为 D-Bus 攻击面；用 `busctl tree` 枚举**全部对象路径**，逐路径 `introspect`——根路径只返回 Introspectable/Peer **不等于**无攻击面
+- **新会话总线服务** → 同为 D-Bus 攻击面，但用 `busctl --user` 系列命令；GUI/桌面组件常在此暴露控制接口，且 Qt 应用会自动导出 `org.qtproject.Qt.QWidget`（`close()`/`show()`/`hide()`）等免费接口
 - **新监听端口** → `curl`/`nc` 测试是否接受非本地连接
 - **新抽象套接字 / P2P socket** → 抽象套接字（`@` 打头）**无文件权限、全 uid 可连**：进 [dbus-authz.md](dbus-authz.md)「第三种拓扑：点对点（P2P）」判有无对端 uid 校验，并做**跨用户连接实测**；文件系统套接字则查父目录 + 文件权限
 
@@ -396,9 +396,9 @@ rm -f <配置目录>/test_write
 
 ---
 
-## 模式 E：配置文件审计（E0–E3 专项）
+## 配置文件审计（攻击面：可写文件 / 配置）
 
-> 次序遵循 SKILL.md「主流程」；本节是模式 E 的技术细节。配置可写 = "未授权写"能力的另一来源，利用链见 [exploit-patterns.md](exploit-patterns.md)。
+> 次序遵循 SKILL.md「主流程」；本节是可写文件/配置攻击面的技术细节。配置可写 = "未授权写"能力的另一来源，利用链见 [exploit-patterns.md](exploit-patterns.md)。
 
 ### E0 权限与属主（`ls -la` / `getfacl`）
 

@@ -4,7 +4,7 @@
 
 **普通用户能否通过该 SUID/cap 执行原本需要 root 的操作 → 能 = 未授权漏洞**
 
-次序与「模式 B 差异」见 SKILL.md「主流程」（唯一权威）；本文件只做 SUID/Cap 专项技术细节。
+次序见 SKILL.md「主流程」（唯一权威）；本文件只做 SUID/Cap 攻击面的技术细节。
 
 ```
 0. 权限边界：普通用户默认能做什么？  → 基线建立（必须先做，非交互）
@@ -173,14 +173,14 @@ export PATH=/tmp:$PATH
 
 ## 相邻攻击面指引
 
-- PolicyKit 策略审计 → 模式 D：[polkit-authz.md](polkit-authz.md)
+- PolicyKit 策略审计（PolicyKit 攻击面）→ [polkit-authz.md](polkit-authz.md)
 - 能力组合风险矩阵、进程内代码执行注入（LD_PRELOAD / Qt 插件目录劫持）、已知能力目标速查 → [cap-analysis.md](cap-analysis.md)
 
 ---
 
 ## 可达性回溯：疑似 sink → 攻击者入口
 
-> **仅 SKILL.md「主流程」4.5 情形 (b)（疑似高危接口利用失败）启用本节**；情形 (a) 只做轻量根因定位，不得展开。
+> **仅 SKILL.md「主流程」第 6 步情形 (b)（疑似高危入口利用失败）启用本节**；情形 (a) 只做轻量根因定位，不得展开。
 
 逆向发现疑似危险汇点（`system`/`popen`/`exec*`/写文件/`unlink`…）后，**必须回溯它如何被进入**。只 grep 直接调用会漏判——信号/槽、回调、`std::function`、vtable 取的是**函数地址**，不是 `call`。
 
