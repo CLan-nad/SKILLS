@@ -166,7 +166,7 @@ def main() -> int:
         info(f"md5={got[0] if got else '?'}（预期 {BIN_MD5}）")
     backup_conf()
     info("TODO：枚举接口/方法/参数；随后**立刻以普通用户调用全部危险方法（未授权测试）**")
-    info("     —— 字符串实参直接用注入载荷（调用即注入，见 dbus-authz.md）")
+    info("     —— 字符串实参直接用注入载荷（带着载荷去探测，见 dbus-authz.md）")
     info("     —— 任何 objdump/nm/strings 之前先调用；静态只定位，不做全面反汇编")
 
     # ---- 阶段 2 Reachability：非交互基线 + 可达性 ----
