@@ -206,7 +206,7 @@ grep -E '^\[|=' /etc/dbus-1/conf/<总线名>.limit 2>/dev/null   # 看 [whitelis
 | `auth forbidden` | auth 层：严格服务校验真实 exe inode 不符，或 `[auth] RootOnly=true` |
 
 - 无任何管控配置的服务 → 直接测未授权调用，不存在绕过问题。
-- 确认管控后才按下节「白名单管控绕过（四法）」选方法（LD_PRELOAD 优先）；`RootOnly`/`rootcontrol=on` 客户端侧无解，直接放弃。
+- 确认管控后才按下节「白名单管控绕过（四法）」选方法（**按白名单项类型选路**，见下节选型表）；`RootOnly`/`rootcontrol=on` 客户端侧无解，直接放弃。
 
 ---
 
@@ -222,18 +222,22 @@ grep -E '^\[|=' /etc/dbus-1/conf/<总线名>.limit 2>/dev/null   # 看 [whitelis
 2. **报错分层**：`operation not permitted -- Invalid client identity` = 身份层（cmdline/exe 路径不在白名单）；`auth forbidden` = auth 层（严格服务追加校验，或 `[auth] RootOnly=true`）。
 3. **攻击面本质**：身份层匹配的是**进程视角的路径字符串**（`/proc/pid/exe`、`/proc/pid/cmdline`），可伪造；严格服务追加 **inode 比对**（路径伪造无效），必须让进程真实运行白名单文件本身。
 
-### 方法选型（LD_PRELOAD 优先）
+### 方法选型（按白名单项类型选路，不预设 LD_PRELOAD 优先）
 
-| 场景 | 方法 |
+先看 `[whitelist]` 里有哪些条目，再按**条目类型**选方法；同时含 `.py` 与 ELF 条目时**先试 ③**（成本更低）。
+
+| 白名单项类型 / 场景 | 方法 |
 |------|------|
-| 白名单含非 setuid、world-exec 的真实 ELF | **① LD_PRELOAD**（严格+宽松通吃，首选） |
+| 白名单项是 **python 源文件路径（`.py`）** | **③ PYTHONPATH 劫持**（此路优先：免编译、免抹 env；脚本**无需可执行位/shebang**；执行的是**真实脚本**，路径/脚本 inode 校验天然满足） |
+| 白名单含非 setuid、world-exec 的真实 ELF | **① LD_PRELOAD**（严格+宽松通吃：真实 `exe`=白名单文件，**inode 校验也过**；LD_* 常被 env 黑名单拦，须注入后先抹 environ） |
 | 严格服务且 env 注入被 LSM 在 exec 期拦截 | **④ ptrace 注入** |
-| 宽松服务（仅 cmdline 校验），白名单为任意路径 | **② bwrap 路径欺骗** |
-| 宽松服务 + 白名单项是 shebang→python 脚本 | **③ PYTHONPATH 劫持** |
+| 宽松服务（仅 cmdline 校验），白名单为任意路径 | **② bwrap 路径欺骗**（真实 inode 未变，严格服务必拒；末选） |
 
-严格/宽松判别：`[rootcontrol] status=off` 或仅 yaml 配置多为宽松（只认 cmdline）；whitelist-only 配置多为严格（还认 inode）。不确定时先用 ②/③ 只读探针试一次定性（被拒=严格，转 ①）。
+**为何 `.py` 条目「优先 ③」而 ①「首选」仅对 ELF 成立**：① 的原始理由是**保留真实 inode** —— LD_PRELOAD 让真实 `exe` 落回白名单 ELF，而 bwrap/argv0 只伪造路径字符串、inode 必被严格服务识破。但任何进程的 `/proc/pid/exe` **恒为解释器**（脚本带 shebang 也一样），不可能等于 `.py` 文件本身 ⇒ `.py` 条目只能靠 argv 路径命中，inode 论对之不适用；而 ③ 执行的是**真实白名单脚本**，脚本层校验仍满足。
 
-### ① LD_PRELOAD 注入（首选）
+严格/宽松判别：`[rootcontrol] status=off` 或仅 yaml 配置多为宽松（只认 cmdline）；whitelist-only 配置多为严格（还认 inode）。不确定时先用 ③/② 只读探针试一次定性（被拒=严格，转 ①/④）。
+
+### ① LD_PRELOAD 注入（白名单项为真实 ELF 时首选）
 
 原理：代码注入白名单真实 ELF 进程内，进程真实 exe 就是白名单文件，身份层与 auth 层天然双满足。
 
@@ -270,18 +274,21 @@ bwrap --ro-bind / / --bind /run /run --bind /tmp /tmp --clearenv \
 
 局限：真实 inode 未变，严格服务（inode 比对）必拒；完整 PoC 见 poc-template.py 变体 `bwrap_whitelist_bypass`。
 
-### ③ PYTHONPATH 劫持（宽松服务，限 python 脚本白名单项）
+### ③ PYTHONPATH 劫持（白名单项为 `.py` 时优先）
 
-原理：白名单项为 shebang→python 脚本时，进程 `cmdline[1]`=脚本路径命中身份层；PYTHONPATH 目录优先级高于系统库，恶意同名包在 import 时执行，以白名单脚本身份**进程内**直接调 D-Bus。
+原理：白名单项是 **python 源文件路径（`.py`）** 时，以 `python3 <白名单脚本>` 运行 —— 进程 `cmdline[1]`=脚本路径命中身份层，且执行的是**真实脚本**；PYTHONPATH 目录优先级高于系统库与发行版包，恶意同名模块在 `import` 时执行，以白名单脚本身份**进程内**直接调 D-Bus。脚本**无需可执行位、无需 shebang**（显式用解释器加载即可）。
 
 ```bash
-mkdir -p evil/<脚本import的包名>
-echo '<进程内 Gio/dbus 调用目标方法>' > evil/<包名>/__init__.py
-PYTHONPATH=$PWD/evil /usr/bin/<白名单脚本>
+# 遮蔽脚本 import 的模块：单文件即可（不必包级 __init__.py）
+mkdir -p evil; echo '<进程内 Gio/dbus 调用目标方法>' > evil/dbus.py
+PYTHONPATH=$PWD/evil python3 <白名单脚本> [args...]
+
+# 更通用：与脚本 import 了谁无关——sitecustomize 由解释器启动自动 import
+echo '<同上>' > evil/sitecustomize.py
 ```
 
-注意：必须造包级 `__init__.py` 抢 sys.path 优先级，纯子包路径不生效。
-局限：仅限 python 解释器的 shebang 项，且脚本需 import 可抢占模块；严格服务被 inode 比对拒。
+注意：遮蔽 `import` 用**单文件 `<模块名>.py`** 即可（如脚本 `import dbus` → 放 `evil/dbus.py`）；`sitecustomize.py` 最通用（解释器启动即加载，不依赖脚本 import 什么）。包级 `__init__.py` 亦可行，但非必需。
+局限：仅限白名单项为 `.py`。（若服务把 `exe` 与白名单项做 inode 比对，则该 `.py` 条目本身即死项 —— `exe` 恒为解释器，此时改走白名单里的 ELF 项 + ①。）
 
 ### ④ ptrace 注入（env 向量被封时的替补）
 
