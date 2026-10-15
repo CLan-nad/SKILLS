@@ -2,7 +2,7 @@
 name: ghidra-mcp-vuln-hunter
 description: 基于 Ghidra MCP 工具链对加载的二进制进行漏洞挖掘。从攻击面获取开始，识别业务接口，深入分析调用链，确认漏洞并形成 POC。适用于各类用户态程序（D-Bus 服务、netlink、socket、配置解析、守护进程等）的逆向漏洞分析。make sure to use this skill whenever the user wants to reverse a binary to hunt vulnerabilities, analyze call chains for security issues, locate business logic entry points in a binary, or confirm and build POC for suspected vulnerabilities using Ghidra MCP tools.
 author: security-researcher
-version: 0.2
+version: 0.3
 triggers:
   - 二进制漏洞挖掘
   - ghidra mcp 逆向分析
@@ -15,6 +15,17 @@ output:
 # ghidra-mcp-vuln-hunter
 
 基于 Ghidra MCP 工具链的二进制漏洞挖掘。本 skill 定义分析主流程，每个环节的详细操作在 `references/` 下对应文件中，按需读取。
+
+## 前置：MCP 后端就绪检查（先于 ⓪）
+
+本 skill 每个环节都要调用 Ghidra MCP 工具（`load_program`、`decompile_function`、`get_xrefs_to` 等）。**动手前先确认这些工具在不在手**：
+
+- 工具**可调用** → 后端已就绪，直接进入 ⓪
+- 工具**不在列表里** → 后端未部署，先按 [docker/deployment.md](docker/deployment.md) 把环境搭好再回来
+
+> 区分"真没部署"和"只加载了部分工具组"：bridge 默认 `--lazy` 只暴露 3 个工具组（`program,function,listing`），缺 `get_xrefs_to`/`analyze_dataflow`/`analyze_function_complete` 这类工具多半是没配 `--default-groups`，处理办法见部署文档 §4.2，不要误判为后端缺失。
+
+后端来自上游 <https://github.com/bethington/ghidra-mcp>（bridge + `GhidraMCP.jar`）。版本对应：镜像 tag `7.0.0` ↔ bridge `7.0.0` ↔ 镜像内 Ghidra `12.1.2`。
 
 ## 分析主流程
 
@@ -151,12 +162,14 @@ strace 是逆向动态验证的基本方法：静态分析给出"应该发生什
 | 危险函数枚举 | `list_imports`（全量拉取后本地过滤标准库符号） |
 | 调用关系 | `get_function_callers`、`get_function_callees` |
 | 复合分析 | `analyze_function_complete`、`find_similar_functions` |
-| 信息辅助 | `get_bytes`、`list_globals`、`get_global_value`、`get_entry_points` |
+| 信息辅助 | `read_memory`、`inspect_memory_content`、`list_globals`、`get_entry_points` |
 
 ## 目录
 
 ```
 SKILL.md                        ← 本文件：主流程 + 证据标准 + POC
+docker/
+└── deployment.md               ← 部署引导：拓扑 / 镜像 / 容器 / bridge / MCP 接入 / 故障排查
 references/
 ├── attack-surface.md           ← ② 攻击面获取（黑盒读取 / 独立梳理）
 ├── entry-point-recognition.md  ← ③ 识别业务接口（框架感知 + 各类入口）
