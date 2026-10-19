@@ -19,6 +19,10 @@ Python PoC 骨架 —— os-security skill
   - **基线必须非交互且与 Impact 同族**（禁用 `systemctl reboot` 等会弹认证/密码的对照命令）
   - **Impact 覆盖尽可能多的可达危险方法**；仅四类不可逆系统级动作（reboot/shutdown、系统还原/回滚、格式化/擦除、不可逆数据销毁）标"可达但不执行"，其余（含进程级 DoS）必须实测取证；未授权读取/只读访问本身即危害
   - 幂等自拉起前置进程；finally 自清理（还原配置/DB、删标记）
+  - **危害可见性（硬性）**：Impact 必须让执行者**当场看到越权效果**，不接受只打印接口返回值——提权类进**特权 shell**（PS1 标注 root，退出后继续清理）、文件类对 **root 所属文件**增/删/改/读（owner_uid / 实读内容 / 写后哈希自证）、信息泄露类打印**实际内容**、服务类展示属主与存活变化
+  - **清理交底**：`cleanup()` 收集无法清理的产物并**返回**，结束前逐条打印"路径 + 一行可直接执行的删除/还原命令"交执行者自行处理；**不得静默留后门**（SUID shell、注入配置）
+  - **动系统文件**：备份 → 改 → 验证 → 还原（放 `finally`）→ **跑前后哈希自证**；写不回去就列入上面的交底
+  - **前置条件提示**：需外部前置时打印一条**自包含、可直接运行**的命令（自行解析二进制路径与必要参数，**不引用目标机上不存在的文件**），并给出**日志路径**便于排错；**PoC 自身不代跑 sudo**（命令由执行者手动执行）
   - 若把载荷**编码进文件名**（如 SQL 注入用 SQLite `char()` 拼接、避开 '/'），注意 Linux 文件名
     成分上限 **255 字节**——超长会 `OSError: File name too long`，需缩短载荷或标记路径
   - **点对点 / 抽象套接字 D-Bus**（服务不挂总线）：填 P2P_ADDR，且**不要**设 DBUS_SESSION_BUS_ADDRESS；
@@ -138,8 +142,12 @@ def restore_conf() -> None:
         shutil.copy2(CONF_BAK, CONF_PATH)
 
 
-def cleanup() -> None:
-    """必须在 finally 调用：还原配置、删标记（含 MARKER_<tag> 多标记）、停掉本次拉起的进程。"""
+def cleanup() -> list:
+    """必须在 finally 调用：还原配置、删标记（含 MARKER_<tag> 多标记）、停掉本次拉起的进程。
+
+    返回 [(未能清理项, 建议命令)]；由 main() 打印出来交执行者自行处理。
+    """
+    leftovers = []
     try:
         restore_conf()
         import glob as _glob
@@ -147,11 +155,13 @@ def cleanup() -> None:
             try:
                 os.remove(f)
             except OSError:
-                pass
+                if os.path.exists(f):                 # 删不掉（如 root 属主）→ 交底，不静默
+                    leftovers.append((f, f"sudo rm -f {f}"))
         if _started:
             sh(["pkill", "-x", APP_NAME])     # 注意用 -x（精确进程名），勿用 pkill -f（会误杀自身 shell）
     except Exception as e:                    # noqa: BLE001
         print(f"{YELLOW}[!] cleanup 异常：{e}{RESET}")
+    return leftovers
 
 
 def main() -> int:
@@ -201,6 +211,18 @@ def main() -> int:
     info("  - 仅四类不可逆系统级动作（reboot/shutdown、还原/回滚、格式化/擦除、数据销毁）标『可达但不执行』；")
     info("    其余（含进程级 DoS：kill/崩溃服务）必须实测取证；只读/空内容仍属危害")
     info("  - strace -f -e trace=execve -p <pid>  观测是否真的出现 sh -c / rm / touch")
+    info("  - ★ 危害可见性：让执行者当场看到效果，而不是只回显接口返回值 ——")
+    info("      提权类 → 进入特权 shell（PS1 标注 root），退出后继续走清理；")
+    info("      文件类 → 对 root 所属文件增/删/改/读（owner_uid / 实读内容 / 写后哈希自证）；")
+    info("      信息泄露类 → 打印实读内容；服务类 → 展示属主与存活变化")
+    # 提权类落地特权 shell 的写法（示例）：ROOTSH 由 payload 落地，套路见 exploit-patterns.md
+    # 「改写既有 SUID 二进制：无法新建文件时的首选」（记得退出后把被改写的系统文件还原并哈希自证）。
+    #   if sys.stdin.isatty():
+    #       env = dict(os.environ); env["PS1"] = "\\[\\033[91m\\]poc-root\\[\\033[0m\\]# "
+    #       subprocess.call([ROOTSH, "--shell"], env=env)     # 继承 stdio → 执行者交互；exit 后继续清理
+    #   else:
+    #       p = subprocess.run([ROOTSH, "--shell"], input="id\nexit\n", text=True, capture_output=True)
+    #       info("非交互运行 → 以特权身份执行 id：" + " | ".join(p.stdout.strip().splitlines()))
     for f in (MARKER,):
         try:
             os.remove(f)
@@ -217,8 +239,13 @@ def main() -> int:
 
     # ---- 阶段 4 Cleanup：清理 ----
     step(4, "Cleanup 清理")
-    cleanup()
-    ok("已还原配置 / 删除标记")
+    leftovers = cleanup()
+    if leftovers:
+        bad("以下内容无法自动清理，请手动处理：")
+        for item, how in leftovers:
+            info(f"{item}    → {how}")
+    else:
+        ok("已还原配置 / 删除标记")
     return 0 if marker_found else 1
 
 
@@ -407,7 +434,8 @@ if __name__ == "__main__":
         rc = 2
     finally:
         try:
-            cleanup()
+            for item, how in cleanup() or []:  # 异常路径下也要交底（二次调用幂等）
+                print(f"{YELLOW}[!] 需手动处理：{item}  →  {how}{RESET}")
         except Exception:                     # noqa: BLE001
             pass
     # 末行三态结论（stdout 最后一行）
