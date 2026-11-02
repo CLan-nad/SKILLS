@@ -2,12 +2,18 @@
 
 个人维护的 Agent Skills 集合，按 `SKILL.md` 约定组织：frontmatter 里的 `name` / `description` 决定何时触发，主流程留在 `SKILL.md`，细则拆进 `references/` 按需读取。可直接放进 Codex、Claude Code 或其他兼容该格式的 agent。
 
-两个 skill 都服务于安全研究：一个打**系统配置面**，一个打**二进制代码面**，也可以串起来用——先用 `os-security` 摸出可疑的 SUID 二进制或 D-Bus 服务，再把二进制丢给 `ghidra-mcp-vuln-hunter` 逆调用链。
+两个 skill 都服务于 **Linux 操作系统安全**：一个打**系统配置面**，一个打**二进制代码面**，也可以串起来用——先用 `os-security` 摸出可疑的 SUID 二进制或 D-Bus 服务，再把二进制丢给 `ghidra-mcp-vuln-hunter` 逆调用链。
 
 | Skill | 面向 | 典型场景 |
 | --- | --- | --- |
 | [`os-security`](os-security/SKILL.md) | Linux 主机与发行版组件 | SUID / Capabilities / D-Bus / PolicyKit / systemd / udev / cron / sudo 的越权与提权评估；分析现成扫描结果；审计 Kylin、openKylin 等系统配置 |
 | [`ghidra-mcp-vuln-hunter`](ghidra-mcp-vuln-hunter/SKILL.md) | 用户态二进制 | D-Bus 服务、netlink、socket 服务端、配置解析、守护进程的接口梳理、调用链分析与漏洞确认 |
+
+## 适用范围
+
+- **目标平台：Linux**。攻击面、判定口径和利用手法都围绕 Linux 的机制展开：SUID / 文件 Capabilities、D-Bus（系统总线与会话总线、点对点与抽象套接字）、PolicyKit、systemd unit、udev、cron、sudoers、内核模块参数等。
+- **发行版**：以 Kylin / openKylin / Ubuntu / Debian 系为主，其他使用 systemd + D-Bus + PolicyKit 的发行版同样适用；涉及厂商自研组件时按“自研优先”处理。
+- **不覆盖**：Windows、macOS、Android、纯固件 / 裸机目标。`ghidra-mcp-vuln-hunter` 的逆向手段本身是通用的，但入口识别与攻击面梳理按 Linux 用户态程序（D-Bus 服务、netlink、socket 服务端、配置解析、守护进程）组织。
 
 ## os-security
 
