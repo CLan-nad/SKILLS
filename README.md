@@ -38,11 +38,13 @@
 
 ```bash
 git clone https://github.com/CLan-nad/SKILLS.git
+mkdir -p ~/.claude/skills
 cp -r SKILLS/os-security SKILLS/ghidra-mcp-vuln-hunter ~/.claude/skills/
 ```
 
 ```powershell
 git clone https://github.com/CLan-nad/SKILLS.git
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex\skills" | Out-Null
 Copy-Item -Recurse SKILLS\os-security, SKILLS\ghidra-mcp-vuln-hunter "$env:USERPROFILE\.codex\skills\"
 ```
 
